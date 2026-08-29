@@ -6,11 +6,18 @@ You name the fault once Sagar's detector fires, and you own the table that turns
 
 **You never need a cluster.** Your input is a file of numbers and labels.
 
-> **Where this fits** (see `PRD.md` §10): same as Sagar — no cluster dependency, no ordering gotcha. Parts 1–7 are Phase 0–4 work. Part 9's later-phases items are Phase 5–6. You're currently blocked on Phase 1 (a real classifier trained on generated faults) until Shaurya's Phase 0 synthetic generator exists — see Part 0 of `docs/guides/shaurya.md`.
+> **Where this fits** (see `PRD.md` §10): same as Sagar — no cluster dependency, no ordering gotcha. Parts 1–7 are Phase 0–4 work. Part 9's later-phases items are Phase 5–6.
 >
-> **Repo status right now:** your Phase 0 is done — `control/policy.py` (policy table), `ml/classifier.py` (stub classifier), `ml/features.py` (40-feature summarization), and `ml/dataset.py` (dataset assembly, with a provisional windowing function pending Sagar's canonical one) are all written, tested, and committed.
+> **Repo status right now (updated after Sagar shipped his real detector):**
+> - ✅ Phase 0 done: `control/policy.py`, `ml/classifier.py` (stub), `ml/dataset.py`.
+> - ✅ `ml/features.py` is now Sagar's canonical shared file (he reconciled it himself, and fixed a real bug — the file was originally named `signal.py`, which shadows Python's stdlib `signal` module).
+> - ✅ Phase 1 done on synthetic data: `ml/train.py` trains the forest on `data/samples/`, split by run (constant=train, ramp=test). Result: 0.99 accuracy — expected to be inflated, see Part 1.3, not yet meaningful.
+> - ✅ Part 6.1 (abstention) and 6.3 (feature importances) done. Two real findings: `mem_pct_slope` isn't in the top-10 features (training is 100% constant-pattern, so slope carries little signal — worth another look on more varied data), and the model is 0% correctly-abstaining / 28.3% confidently-wrong on a held-out fault class (`ml/abstention.py`) — a genuine safety gap, not a data artifact.
+> - ✅ Part 5 (optional CNN) done: `ml/cnn.py` scored 0.96 accuracy / 72s train time, **losing** to the forest's 0.99 / ~instant. Per the guide, ship the forest, report the CNN as tried-and-lost.
+> - 🟢 **Part 6.2 (the headline accuracy-vs-lead-time curve) is now unblocked.** Sagar shipped a real, working `ml/detector.py` (proper interface, `on_restart()` suppression, k-of-n voting, all fixed from the earlier broken draft) plus `ml/replay.py` — `train_and_replay()` and `firing_events()` give exactly the firing-timestamps input this curve needs. Not built yet, but nothing is blocking it anymore.
+> - ❌ Still missing: Shravan's decision-tree baseline (Part 5.2's comparison table has an empty row) — no visible progress from him beyond his one cluster/workloads commit, worth asking him directly. Real (non-synthetic) data also still doesn't exist — training is 100% on Shaurya's Phase 0 synthetic fixture.
 >
-> **Your next 2 steps:** (1) formalize the ad-hoc smoke tests into a real test suite for `features.py`/`dataset.py`/`policy.py` — genuinely doable now, nothing to wait on. (2) once Sagar starts his shared feature file, reconcile your provisional `windows()` in `ml/dataset.py` into it rather than maintaining two versions.
+> **Your next step:** build the accuracy-vs-lead-time curve (Part 6.2) using `ml.replay.train_and_replay` + `firing_events` against `data/samples/` — this is the headline result and it's the only unblocked item left in Part 6.
 
 ---
 
@@ -217,6 +224,8 @@ Ship the model file to Shravan as soon as it beats his stub. Agree the signature
 ```python
 label, confidence = classifier.predict(window)
 ```
+
+> **Blocked as of the last check:** Shravan's decision-tree baseline (his cross-cutting responsibility, `PRD.md` §11.1 — "if the rule ties the model, the rule ships") doesn't exist yet on any branch. `ml/train.py`'s 0.99 accuracy has nothing to be compared against, and the Part 5.2 comparison table can't be filled in until it does. Worth flagging to him directly rather than waiting.
 
 ---
 
