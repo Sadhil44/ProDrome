@@ -488,3 +488,105 @@ They train in the simulator because it's thousands of times faster. You provide 
 - [ ] Cooldown, ceiling, and kill switch each verified
 - [ ] Decision log readable by someone who didn't write it
 - [ ] Simple decision-tree baseline trained and printed for the team
+
+
+---
+
+## Appendix — the full phase plan, all four roles
+
+This is the complete phase-by-phase breakdown from `PRD.md` §10–§11, reproduced here in full so nobody has to cross-reference the PRD to see how the four tracks connect. Identical copy in all four guides.
+
+Seven phases. Each has a stated **exit criterion** — the thing that has to be true before anyone moves on, not just "time to move on."
+
+### Phase 0 — Scaffolding
+**Exit criterion:** *any one* component builds and tests with no cluster and no teammate. The whole point is nobody needs anybody else yet.
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Chaos-runner stub; cluster configuration committed |
+| Shaurya | The synthetic data generator — "the artifact that unblocks everyone else" — plus committed samples |
+| Sagar | Shared feature and windowing code; detector stub |
+| Sadhil | Policy table; feature summarization design; classifier stub |
+
+### Phase 1 — Skeleton
+**Exit criterion:** a hand-injected fault produces a logged decision. The loop runs end-to-end for the first time — badly, on stubs, but completely.
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Cluster with limits and probes; controller loop running on stubs, in shadow mode |
+| Shaurya | Metric collection with no workload instrumentation; scraper verified against real Prometheus |
+| Sagar | The real detector, built and tuned against generated (synthetic) data |
+| Sadhil | The real classifier, trained on generated faults |
+
+Dependency to notice: Shravan's controller loop can run immediately against the ML pair's stubs — he doesn't need real models. But Sagar's and Sadhil's *real* models both need Shaurya's *full* Phase 0 generator (faults + labels, not just healthy data) to train against. That's the actual chokepoint in this phase.
+
+### Phase 2 — Grounded
+**Exit criterion:** the pipeline runs on real data, and the detector fires on real faults. Synthetic data gets replaced by the real thing.
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Control-arm namespace running identical workloads with no Prodrome |
+| Shaurya | Canonical healthy baseline; fault matrix with two activation patterns (constant + ramp); clean runs; labeled dataset — all real, off the actual cluster |
+| Sagar | Refit on the canonical healthy baseline; thresholds adjusted for real noise |
+| Sadhil | Retrained on canonical labels; comparison against Phase 1 generated-data results |
+
+This is where the biggest risks in `PRD.md` §13 concentrate: "detector trained on fault data by accident," "control arm omitted or added late" — both must be resolved by end of this phase, not later.
+
+### Phase 3 — Learned
+**Exit criterion:** a published comparison table, with the better model actually in the loop. The "prove it's not just a rule dressed up as ML" phase.
+
+| Person | Deliverable |
+|---|---|
+| Shravan | The simple baseline classifier — a shallow, readable decision tree (cross-cutting responsibility, separate from his main track) |
+| Shaurya | Evaluation harness producing the per-fault results table |
+| Sagar | Per-fault recall and lead-time table; false positives per hour |
+| Sadhil | Model comparison table (tree vs. forest vs. CNN); confusion matrix; feature attribution |
+
+Standing rule governing this whole phase: a simple baseline is built and reported before any sophisticated model is credited. If the forest ties the tree, the tree ships — that's a stated legitimate outcome, not a failure.
+
+### Phase 4 — Acting
+**Exit criterion:** a defensible comparison against stock Kubernetes. `PRD.md` calls this out directly: "Phase 4 is where the project first has a result rather than a demo."
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Controller live (dry-run off), safety rails verified, head-to-head experiment executed |
+| Shaurya | Head-to-head experiment execution; the actual results |
+| Sagar | Detector live in the loop; restart-suppression verified (the infinite-loop guard) |
+| Sadhil | Abstention measurement (both numbers); the accuracy-versus-lead-time curve — the headline result |
+
+Sagar's live-firing timestamps and Sadhil's headline curve are directly coupled here — his replay output is the x-axis of that plot.
+
+### Phase 5 — Packaged
+**Exit criterion:** an external operator installs it from scratch and reports back.
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Declarative per-workload configuration resource, scoped ServiceAccount permissions, one-command install |
+| Shaurya | Automatic baselining on install (no manual training step); the live terminal dashboard |
+| Sagar | Automatic baselining for the detector; drift detection (refit trigger) |
+| Sadhil | Pluggable failure taxonomy; open-set/novelty recognition (upgrading the abstention floor) |
+
+### Phase 6 — Learned policy
+**Exit criterion:** the learned policy matches or beats the hand-written table, in simulation *and* in shadow on the real cluster. The biggest phase by far — `PRD.md` §10.1 gives it its own detailed sub-plan.
+
+Two implementations of one shared interface:
+
+| Implementation | Built by | Purpose |
+|---|---|---|
+| Simulated environment | Sagar + Sadhil | Fast fake model of workload/pod/failure dynamics — thousands of episodes/hour |
+| Real environment | Shaurya + Shravan | The actual cluster and fault harness, behind the identical interface |
+
+| Person | Deliverable |
+|---|---|
+| Shravan | Real-cluster training environment behind the shared interface; shadow-mode deployment of the learned policy |
+| Shaurya | Episode replay from the decision log; the cost-versus-latency curve comparing learned policy vs. hand-written table vs. HPA vs. KEDA |
+| Sagar | The load forecaster feeding the agent's state vector; the simulated training environment itself |
+| Sadhil | The RL agent, its reward function, and the offline training pipeline seeded from logged episodes |
+
+**Safety ordering matters more than architecture here:** (1) bootstrap from the Phase 4 policy table so the agent starts competent, (2) train offline on logged decisions with zero exploration, (3) simulate — thousands of fast episodes, (4) then go online but only in the chaos environment, never a real workload, (5) ship in shadow, disagreements logged and read before anything gets authority. The reward needs an explicit cost term and action-count penalty, or the project reproduces NimbusGuard's failure mode — 5x faster, 80% more replicas — which the PRD treats as a cautionary tale, not a template.
+
+**The honest exit scenario, stated explicitly in the PRD:** if the learned policy just converges to the hand-written table, that's not a null result — it's validation that the table was already correct.
+
+### The thread that runs through all seven phases
+
+`PRD.md` §12.1: **Baseline → Fit → Perturb → Learn → Decide → Act → Measure → Iterate.** Every new fault type, model, or action re-enters this cycle at the relevant stage, and nothing skips **Measure** — which is really just the standing review question restated: *what's the baseline, and did you beat it?*
