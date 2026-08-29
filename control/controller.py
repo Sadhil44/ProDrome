@@ -132,7 +132,6 @@ def record_action(workload):
 def kill_switch_active():
     return STOP_FILE.exists()
 
-
 if __name__ == "__main__":
     if kill_switch_active():
         print("[STOP] Kill switch is active!")
