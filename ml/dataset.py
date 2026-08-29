@@ -3,16 +3,7 @@
 
 import pandas as pd
 
-from ml.features import summarize
-
-WINDOW_SIZE = 20
-
-
-def windows(metrics: pd.DataFrame, workload: str, size: int = WINDOW_SIZE):
-    """Yield sliding size-tick windows for one workload, oldest first."""
-    sub = metrics[metrics["workload"] == workload].sort_values("ts").reset_index(drop=True)
-    for start in range(len(sub) - size + 1):
-        yield sub.iloc[start : start + size]
+from ml.signal import WINDOW_SIZE, summarize, windows
 
 
 def _label_window(labels_for_workload: pd.DataFrame, ref_ts):
