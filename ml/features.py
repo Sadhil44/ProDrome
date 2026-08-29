@@ -3,7 +3,13 @@
 Owned by Sagar per docs/guides/sagar.md Part 4.1: canonical metric order
 and windowing. Sadhil extends it with feature summarization -- one file,
 two owners. Reconciled out of the provisional copies in ml/dataset.py
-(windows) and ml/features.py (summarize) per both guides' Phase 0 notes.
+(windows) and this file's original standalone version (summarize) per
+both guides' Phase 0 notes.
+
+Named features.py rather than signal.py: a module named signal.py
+shadows Python's stdlib `signal` module for anything run from inside
+ml/, since that adds ml/ to sys.path -- pandas imports subprocess,
+which imports the real signal, and gets this file instead.
 
 METRICS order is frozen: Sadhil and Shravan both index arrays by
 position. Reordering this silently breaks both of them.

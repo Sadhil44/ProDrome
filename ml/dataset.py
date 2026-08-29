@@ -3,7 +3,7 @@
 
 import pandas as pd
 
-from ml.signal import WINDOW_SIZE, summarize, windows
+from ml.features import WINDOW_SIZE, summarize, windows
 
 
 def _label_window(labels_for_workload: pd.DataFrame, ref_ts):
