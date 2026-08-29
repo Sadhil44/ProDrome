@@ -6,6 +6,12 @@ You decide whether a workload is behaving abnormally and heading for failure. Th
 
 **You never need a cluster.** Your input is a file of numbers. You can do all of this on a laptop with Python.
 
+> **Where this fits** (see `PRD.md` §10): everything below is Phase 0–3 work, and unlike Shaurya's guide there's no ordering gotcha — you're never blocked on a cluster, so you can start immediately once Shaurya's Phase 0 synthetic generator (or `data/samples/`) exists. Part 8's later-phases items are Phase 5–6.
+>
+> **Repo status right now:** nothing in `ml/detector.py` or a shared feature file exists yet. Sadhil has already written a *provisional* windowing function (`ml/dataset.py`'s `windows()`) and a 40-feature summarizer (`ml/features.py`), explicitly flagged as standing in for your canonical shared feature file until it exists — worth reading before you start, so you're reconciling into something rather than duplicating it from scratch. No real or synthetic data exists yet either (Shaurya hasn't built the Phase 0 generator), so nothing you build can be tuned against real numbers yet.
+>
+> **Your next 3 steps:** (1) look at `ml/dataset.py` and `ml/features.py`, agree the canonical metric order with Sadhil, then move windowing into your shared file per Part 4.1. (2) build the detector itself, Part 4.3 — testable against any fabricated fixture in the meantime, doesn't need Shaurya's generator to exist. (3) build the replay harness, Part 4.2.
+
 ---
 
 ## Part 1 — What you're actually building

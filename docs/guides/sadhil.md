@@ -6,6 +6,12 @@ You name the fault once Sagar's detector fires, and you own the table that turns
 
 **You never need a cluster.** Your input is a file of numbers and labels.
 
+> **Where this fits** (see `PRD.md` §10): same as Sagar — no cluster dependency, no ordering gotcha. Parts 1–7 are Phase 0–4 work. Part 9's later-phases items are Phase 5–6. You're currently blocked on Phase 1 (a real classifier trained on generated faults) until Shaurya's Phase 0 synthetic generator exists — see Part 0 of `docs/guides/shaurya.md`.
+>
+> **Repo status right now:** your Phase 0 is done — `control/policy.py` (policy table), `ml/classifier.py` (stub classifier), `ml/features.py` (40-feature summarization), and `ml/dataset.py` (dataset assembly, with a provisional windowing function pending Sagar's canonical one) are all written, tested, and committed.
+>
+> **Your next 2 steps:** (1) formalize the ad-hoc smoke tests into a real test suite for `features.py`/`dataset.py`/`policy.py` — genuinely doable now, nothing to wait on. (2) once Sagar starts his shared feature file, reconcile your provisional `windows()` in `ml/dataset.py` into it rather than maintaining two versions.
+
 ---
 
 ## Part 1 — What you're building and why

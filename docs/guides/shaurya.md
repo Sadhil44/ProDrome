@@ -4,6 +4,34 @@
 
 You produce the data everyone else consumes, and the numbers that say whether any of it worked. This guide assumes you've never used Prometheus and explains monitoring from zero.
 
+> **Where this fits** (see `PRD.md` §10 for the full phase plan): **Part 0 below is Phase 0 — do it first.** It's what unblocks Sagar and Sadhil before any cluster exists. Parts 1–2 are Phase 1–2 (the real scraper, real collection). Part 7 is the Phase 3 evaluation harness. The dashboard (Phase 5) and the Phase 6 cost-versus-latency curve aren't covered in this guide yet.
+>
+> **Repo status right now:** nothing in `collect/` exists yet — no synthetic generator, no scraper, no load generator, no chaos runner. `data/samples/` is empty except a placeholder README. Shravan's cluster exists (3 nodes running), but no workloads are deployed to it yet, so the real pipeline (Part 2 onward) isn't buildable either way yet. Sagar and Sadhil are both actively waiting on the Part 0 generator below to make real progress.
+>
+> **Your next 3 steps:** (1) build the Phase 0 synthetic generator, Part 0 below — this is the one nothing else is waiting on, and the most-blocking thing you own right now. (2) once Shravan deploys workloads, install real Prometheus, Part 2.1 (helm is already installed and working in this environment). (3) build the real scraper, Part 3.2.
+
+---
+
+## Part 0 — Do this first: the synthetic data generator
+
+**This section doesn't exist anywhere else, and it's easy to miss that it's supposed to come before everything below.** Per `PRD.md` §10, this is your actual Phase 0 deliverable, and the PRD calls it "the artifact that unblocks everyone else." Sagar and Sadhil can't build or test anything real until it exists — their guides both assume they already have a metrics file and a labels file to work against, and right now nothing produces those.
+
+**Why this comes before Part 2 (the real Prometheus setup).** Everything from Part 2 onward assumes a live cluster. That's real, necessary work, but it isn't the *first* thing to build. Sagar and Sadhil are both explicitly "never blocked, no cluster required" per the PRD — and that's only true if this generator exists first. Skip straight to installing Prometheus and everyone ends up waiting on Shravan's cluster anyway, which is the exact blocking chain Phase 0 exists to prevent.
+
+**What it has to produce.** Two files, matching the contracts in `SETUP.md` §7 exactly — nothing downstream reads anything else, so getting the shape right matters more than realism:
+
+- A **metrics table** (Parquet): `ts, workload, cpu_cores, mem_bytes, mem_pct, net_rx, net_tx, fs_reads, fs_writes, restarts` — one row per workload per 15-second tick. A few workloads is enough (`redis`, `nginx`, `postgres`, matching everyone else's examples).
+- A **labels table** (CSV): `start_ts, end_ts, workload, fault_type, pattern, run_id` — one row per injected fault.
+
+**The two properties that actually matter — not just "fake numbers":**
+
+1. **Realistic variation, not flat.** Reuse the same diurnal-cycle idea from your real load generation (Part 4.2) — a sine wave or staged ramp per workload, plus noise. If healthy data is flat, Sagar's detector learns "normal" means flat and fires on the first genuine traffic change — a bug worth catching here rather than for the first time on real data.
+2. **Ramping faults, not just steps.** Same reasoning as the real chaos injection (Part 5.4): if every synthetic fault jumps straight to full intensity, Sadhil's model never sees what a slide toward failure looks like, and the later jump to real data becomes bigger than it needs to be. Generate both `constant` and `ramp` patterns, same as you will for real.
+
+**A minimal approach**, roughly a day of work: for each workload, generate a healthy time series per metric (baseline + daily-cycle sine + gaussian noise), pick a handful of windows to overwrite with a fault trajectory (constant: jump immediately; ramp: staircase up over several minutes) for each of `CPU_HOG` / `MEMORY_LEAK` / `DISK_STRESS`, and record the matching label row as you go. Save a small slice of the output to `data/samples/` (committed) — that doubles as the fixture `SETUP.md` §3 promises everyone.
+
+It doesn't need to be sophisticated. The whole point, for Sagar and Sadhil, is that it's disposable and gets replaced by real data in Phase 2. It just needs to exist and match the schema.
+
 ---
 
 ## Part 1 — Understanding monitoring

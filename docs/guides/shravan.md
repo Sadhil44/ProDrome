@@ -4,6 +4,12 @@
 
 You own the machine everything runs on and the component that actually changes things. This guide assumes you have never touched Kubernetes and explains everything from zero.
 
+> **Where this fits** (see `PRD.md` §10): Part 3 is Phase 0–1 (the cluster). Part 4 runs from Phase 1 (controller loop on stubs, in shadow) through Phase 4 (controller live, safety rails verified). Part 5.3 is Phase 6.
+>
+> **Repo status right now:** the `prodrome` kind cluster exists and is running (3 nodes Ready, context `kind-prodrome`) — Part 3.1 is done. Nothing past that yet: no stress-tool images, no `infra/workloads.yaml`, no controller code in `control/`. Two things you'll wire in already exist, ready to import: `ml/classifier.py` (stub, returns `("MEMORY_LEAK", 0.9)`) and `control/policy.py` (`decide(predicted_class, confidence) -> action`). Sagar's detector stub isn't written yet, so per Part 4.4 you'll need your own throwaway `fired = memory > 80%` detector until his real one exists.
+>
+> **Your next 3 steps:** (1) build the stress-tool images and load them into the cluster, Part 3.3. (2) deploy the workloads with resource limits and probes, Part 3.4, then prove a failure actually happens by hand, Part 3.5 — nothing else substitutes for watching an OOMKill happen once. (3) start the controller loop against the stubs above, in shadow mode.
+
 ---
 
 ## Part 1 — Understanding what you're building
