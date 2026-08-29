@@ -62,6 +62,12 @@ def main():
         index=labels_order, columns=labels_order,
     ))
 
+    # Sanity check (docs/guides/sadhil.md Part 6.3): if mem_pct_slope isn't
+    # near the top, something's off with the labels, not just the model.
+    importances = pd.Series(clf.feature_importances_, index=features).sort_values(ascending=False)
+    print("\ntop 10 feature importances:")
+    print(importances.head(10))
+
     return clf
 
 
