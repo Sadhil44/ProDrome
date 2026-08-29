@@ -6,6 +6,8 @@ You name the fault once Sagar's detector fires, and you own the table that turns
 
 **You never need a cluster.** Your input is a file of numbers and labels.
 
+> **Where this fits** (see `PRD.md` §10): same as Sagar — no cluster dependency, no ordering gotcha. Parts 1–7 are Phase 0–4 work. Part 9's later-phases items are Phase 5–6. You're currently blocked on Phase 1 (a real classifier trained on generated faults) until Shaurya's Phase 0 synthetic generator exists — see Part 0 of `docs/guides/shaurya.md`.
+
 ---
 
 ## Part 1 — What you're building and why

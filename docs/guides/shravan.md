@@ -4,6 +4,8 @@
 
 You own the machine everything runs on and the component that actually changes things. This guide assumes you have never touched Kubernetes and explains everything from zero.
 
+> **Where this fits** (see `PRD.md` §10): Part 3 is Phase 0–1 (the cluster). Part 4 runs from Phase 1 (controller loop on stubs, in shadow) through Phase 4 (controller live, safety rails verified). Part 5.3 is Phase 6.
+
 ---
 
 ## Part 1 — Understanding what you're building

@@ -6,6 +6,8 @@ You decide whether a workload is behaving abnormally and heading for failure. Th
 
 **You never need a cluster.** Your input is a file of numbers. You can do all of this on a laptop with Python.
 
+> **Where this fits** (see `PRD.md` §10): everything below is Phase 0–3 work, and unlike Shaurya's guide there's no ordering gotcha — you're never blocked on a cluster, so you can start immediately once Shaurya's Phase 0 synthetic generator (or `data/samples/`) exists. Part 8's later-phases items are Phase 5–6.
+
 ---
 
 ## Part 1 — What you're actually building
