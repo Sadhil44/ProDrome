@@ -144,8 +144,10 @@ def _apply_fault(arr: dict, prof: dict, s: int, fault: str, pattern: str,
         breached = np.where(arr["mem_bytes"][idx] >= limit)[0]
         if breached.size:
             first = int(idx[breached[0]])
-            arr["restarts"][first:min(first + 3, len(arr["restarts"]))] = 1  # the OOMKill
-            end_idx = first                                                   # failure instant
+            end_idx = first                    # failure instant
+            arr["restarts"][first] = 1         # OOMKill -- exactly on end_idx, so a
+            #                                    [start_ts, end_ts] exclusion catches it
+            #                                    and no restart tick leaks into "healthy"
 
     elif fault == "DISK_STRESS":
         arr["fs_writes"][idx] += 5000 * g * (1 + rng.normal(0, 0.08, w))

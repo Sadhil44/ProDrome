@@ -2,6 +2,36 @@
 
 Metric scraper, chaos runner, load generation. Owned by Shaurya — see [SETUP.md](../SETUP.md) §6.
 
+## Scripts
+
+| Path | Part | What |
+|---|---|---|
+| `scrape.py` | 3.2 | Export a time window of the 8 metrics from Prometheus → Parquet. `--minutes N` or `--start/--end`. |
+| `load/run-load.sh` | 4 | Diurnal load against all 6 workloads (prodrome + control). `DAYS=84` ≈ 14h. See `load/README.md`. |
+| `chaos.py` | 5 | Inject CPU_HOG / MEMORY_LEAK / DISK_STRESS / POD_KILL via `kubectl exec … stress-ng`; write `data/chaos/labels.csv`. `--campaign` or `--one`. |
+
+### The two collection runs
+
+Both need the Prometheus port-forward loop (guide §2.2) up, and the load
+generator running so metrics vary. **Before each run, reset the pods** so restart
+counts start at 0 and there's no leftover memory pressure:
+
+```bash
+kubectl rollout restart deployment -n prodrome && kubectl rollout status deployment -n prodrome
+kubectl rollout restart deployment -n control  && kubectl rollout status deployment -n control
+```
+
+1. **Healthy** (`data/healthy/metrics.parquet` → Sagar). Load only, no chaos.
+   Run `run-load.sh` overnight, then `scrape.py --start <after-reset> --end <now>`.
+2. **Chaos** (`data/chaos/{metrics.parquet,labels.csv}` → Sadhil). Load + chaos.
+   Keep load running, `python collect/chaos.py --campaign` (~2.5h), then run the
+   `scrape.py` line it prints.
+
+MEMORY_LEAK note: on this cluster (cgroup v2) the OOM killer usually reaps
+stress-ng rather than the container, so `restarts` fires inconsistently for
+MEMORY_LEAK runs — the rising `mem_pct` trajectory is the reliable signal, and
+that's what the models key on.
+
 ---
 
 ## The eight metrics — FROZEN
