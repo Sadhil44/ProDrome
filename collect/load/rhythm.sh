@@ -15,14 +15,26 @@ set -uo pipefail
 ns="${1:?usage: rhythm.sh <namespace> <redis|postgres>}"
 kind="${2:?usage: rhythm.sh <namespace> <redis|postgres>}"
 
-# phase within the 600-second day -> number of concurrent clients
+# phase within the 600-second day -> number of concurrent clients.
+# postgres gets a lighter staircase: pgbench is ~3x heavier per client than
+# redis-benchmark, and at the redis levels postgres pegs its CPU limit flat --
+# no diurnal rhythm, and no headroom for a CPU_HOG fault to show. These keep
+# postgres around 50-60% of its limit at peak.
 concurrency() {
   local p=$(( $(date +%s) % 600 ))
-  if   (( p < 120 )); then echo 2    # night
-  elif (( p < 240 )); then echo 16   # morning ramp
-  elif (( p < 360 )); then echo 8    # midday dip
-  elif (( p < 480 )); then echo 24   # evening peak
-  else echo 2; fi                    # night again
+  if [[ "$kind" == postgres ]]; then
+    if   (( p < 120 )); then echo 1    # night
+    elif (( p < 240 )); then echo 5    # morning ramp
+    elif (( p < 360 )); then echo 3    # midday dip
+    elif (( p < 480 )); then echo 8    # evening peak
+    else echo 1; fi                    # night again
+  else
+    if   (( p < 120 )); then echo 2    # night
+    elif (( p < 240 )); then echo 16   # morning ramp
+    elif (( p < 360 )); then echo 8    # midday dip
+    elif (( p < 480 )); then echo 24   # evening peak
+    else echo 2; fi                    # night again
+  fi
 }
 
 echo "rhythm: $kind @ $ns  (pid $$)"
