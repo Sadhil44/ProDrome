@@ -5,6 +5,10 @@
 You produce the data everyone else consumes, and the numbers that say whether any of it worked. This guide assumes you've never used Prometheus and explains monitoring from zero.
 
 > **Where this fits** (see `PRD.md` §10 for the full phase plan): **Part 0 below is Phase 0 — do it first.** It's what unblocks Sagar and Sadhil before any cluster exists. Parts 1–2 are Phase 1–2 (the real scraper, real collection). Part 7 is the Phase 3 evaluation harness. The dashboard (Phase 5) and the Phase 6 cost-versus-latency curve aren't covered in this guide yet.
+>
+> **Repo status right now:** nothing in `collect/` exists yet — no synthetic generator, no scraper, no load generator, no chaos runner. `data/samples/` is empty except a placeholder README. Shravan's cluster exists (3 nodes running), but no workloads are deployed to it yet, so the real pipeline (Part 2 onward) isn't buildable either way yet. Sagar and Sadhil are both actively waiting on the Part 0 generator below to make real progress.
+>
+> **Your next 3 steps:** (1) build the Phase 0 synthetic generator, Part 0 below — this is the one nothing else is waiting on, and the most-blocking thing you own right now. (2) once Shravan deploys workloads, install real Prometheus, Part 2.1 (helm is already installed and working in this environment). (3) build the real scraper, Part 3.2.
 
 ---
 
