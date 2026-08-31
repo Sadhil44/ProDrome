@@ -124,6 +124,7 @@ prodrome/
 ├── collect/            Metric scraper, chaos runner, load generation
 ├── ml/                 Detector, classifier, shared feature code
 ├── control/            Controller loop, policy table
+├── dashboard/         Live view of decisions — terminal today, see dashboard/README.md for why not web yet
 ├── eval/               Evaluation harness, plots
 ├── data/               GITIGNORED except samples/
 │   ├── samples/        Small committed fixtures — everyone can run everything
