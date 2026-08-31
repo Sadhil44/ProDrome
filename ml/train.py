@@ -5,7 +5,10 @@ constant-pattern runs, tests on ramp-pattern runs, so accuracy reflects
 generalization instead of near-duplicate windows leaking across the split.
 
 Run: python -m ml.train
+    python -m ml.train --metrics data/chaos/metrics.parquet --labels data/chaos/labels.csv
 """
+
+import argparse
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -15,6 +18,13 @@ from ml.dataset import build_dataset
 
 FEATURE_SUFFIXES = ("_mean", "_slope", "_std", "_max", "_last")
 
+# NORMAL: quiet periods - Sagar's detector filters those out before a
+# window ever reaches the classifier (docs/guides/sadhil.md Part 8).
+# POD_KILL: instantaneous, no diagnosis lever in control/policy.py -
+# it's reported separately as the near-zero-lead-time honest failure
+# case (docs/guides/shaurya.md Part 5.5), never a classification target.
+NON_CLASSIFIABLE_LABELS = ("NORMAL", "POD_KILL")
+
 
 def load_labeled_windows(metrics_path="data/samples/metrics.parquet", labels_path="data/samples/labels.csv"):
     metrics = pd.read_parquet(metrics_path)
@@ -23,10 +33,7 @@ def load_labeled_windows(metrics_path="data/samples/metrics.parquet", labels_pat
     df = build_dataset(metrics, labels)
     df = df.merge(labels[["run_id", "pattern"]], on="run_id", how="left")
 
-    # Classify firings, not quiet periods - Sagar's detector already
-    # filters those out before a window ever reaches the classifier.
-    # See docs/guides/sadhil.md Part 8.
-    return df[df["label"] != "NORMAL"].reset_index(drop=True)
+    return df[~df["label"].isin(NON_CLASSIFIABLE_LABELS)].reset_index(drop=True)
 
 
 def split_by_run(df):
@@ -40,7 +47,13 @@ def feature_columns(df):
 
 
 def main():
-    df = load_labeled_windows()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--metrics", default="data/samples/metrics.parquet")
+    ap.add_argument("--labels", default="data/samples/labels.csv")
+    args = ap.parse_args()
+
+    df = load_labeled_windows(args.metrics, args.labels)
+    print(f"source: {args.metrics}, {args.labels}\n")
     print("label distribution:\n", df["label"].value_counts(), "\n")
 
     train, test = split_by_run(df)
