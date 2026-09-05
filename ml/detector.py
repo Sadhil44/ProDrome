@@ -23,12 +23,12 @@ import pandas as pd
 
 from ml.features import METRICS
 
-# Chosen via the Part 5.1 sweep against the sample fixture: best recall
-# among the configs at fp_per_hour=0.00 (see docs/guides/sagar.md Part
-# 5.2 for the balanced-vs-precision writeup). Caveat: the sample is tiny
-# enough that several configs hit zero measured false positives, so this
-# isn't yet a validated precision/recall tradeoff -- revisit once
-# Shaurya's real healthy/chaos data lands.
+# Chosen via the Part 5.1 sweep against REAL data/healthy + data/chaos
+# (see docs/guides/sagar.md Part 5.2.1). The earlier synthetic-only pick
+# used k=3, which measured well on the sample fixture but collapsed to
+# 0.0 recall on DISK_STRESS and MEMORY_LEAK against real data -- real
+# faults don't correlate across metrics as cleanly as the generator
+# stylized them. k=2 is the best real-data balance found.
 ALPHA = 0.1                    # EWMA prediction responsiveness
 ERROR_HISTORY = 100            # ticks of error history kept per metric
 WARMUP_TICKS = 30              # ticks before a metric starts scoring
@@ -36,7 +36,7 @@ RECENT_WINDOW = 5              # "recent" errors compared against the full histo
 Z_THRESHOLD = 2.5              # std devs of error above typical -> anomalous
 STD_FLOOR = 1e-6               # avoids divide-by-zero on constant metrics
 
-K_OF_N_METRICS = 3             # how many metrics must be anomalous at once
+K_OF_N_METRICS = 2             # how many metrics must be anomalous at once
 N_CONSECUTIVE = 1              # how many consecutive ticks that must hold
 MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (perfectly constant) are dropped
 # A metric can be "almost always constant, rare tiny blip" (restarts; net_tx on a

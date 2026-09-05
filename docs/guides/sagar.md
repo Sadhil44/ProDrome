@@ -227,18 +227,23 @@ Lower thresholds → more firings → higher recall, lower precision. Higher →
 
 **There is no configuration that's best at both.** Pick deliberately and report both the balanced choice and the precision-optimal one. The published paper found exactly the same tradeoff; naming it is a sign you understand the problem, not a weakness.
 
-### 5.2.1 Chosen configuration (against the sample fixture)
+### 5.2.1 Chosen configuration
 
-Run against the bundled `data/samples/metrics.parquet` + `labels.csv` (24-combo sweep, `ml/tune.py`):
+**Superseded once (below), then confirmed against real data.** First pass was a 24-combo sweep (`ml/tune.py`) against the bundled `data/samples/metrics.parquet` fixture, which picked `alpha=0.1, threshold=2.5, k=3, n=1` (0.00 fp/hr, 0.83/0.83/0.50 recall). That config was never validated against anything real -- and once `data/healthy/metrics.parquet` + `data/chaos/{metrics.parquet,labels.csv}` landed, re-running the same sweep for real (`Detector.fit_healthy` on real healthy data, `ml.replay.replay` against real chaos data -- safe here since the two files don't overlap in time) showed it collapsing:
 
-| | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK |
-|---|---|---|---|---|---|---|---|---|
-| **Balanced (chosen default)** | 0.1 | 2.5 | 3 | 1 | 0.00 | 0.83 recall, 255s lead | 0.83 recall, 285s lead | 0.50 recall, 210s lead |
-| **Precision-leaning alternate** | 0.1 | 4.0 | 3 | 2 | 0.00 | 0.67 recall, 240s lead | 0.67 recall, 270s lead | 0.50 recall, 180s lead |
+| | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK | POD_KILL |
+|---|---|---|---|---|---|---|---|---|---|
+| Old pick, on real data | 0.1 | 2.5 | **3** | 1 | 0.27 | 0.42 recall, 260s lead | **0.00 recall** | **0.00 recall** | 0.0 |
+| **New pick (chosen default)** | 0.1 | 2.5 | **2** | 1 | 0.71 | 0.42 recall, 260s lead | 0.17 recall, 262s lead | 0.42 recall, **11s lead** | 0.0 |
 
-**Caveat:** several configs in the grid hit `fp_per_hour = 0.00` on this sample -- it's a handful of clean hours in one small file, so zero measured false positives likely means "not enough clean data to trigger one" rather than a validated precision ceiling. The balanced pick above is the best-recall config among the zero-FP ones, not the winner of a real precision/recall tradeoff. Revisit both numbers once Shaurya's real healthy/chaos data replaces this fixture -- the tradeoff Part 5.2 describes should actually show up then.
+**What changed and why:** `k=3` measured well on the synthetic fixture because the generator stylizes each fault to move several metrics together in a clean, correlated way. Real `DISK_STRESS` and `MEMORY_LEAK` don't correlate across metrics nearly as cleanly, so requiring 3 simultaneous anomalous metrics was too strict to ever fire on them at all -- `k=2` is the best balance actually found on real data.
 
-The balanced config is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
+**What real data revealed, not just retuned:**
+- **Recall is lower across the board on real data** (0.17-0.42 vs. 0.50-0.83 synthetic) -- report this per fault type, not as one aggregate (ground rule #6).
+- **Real `MEMORY_LEAK` lead time is ~11-27s, not ~165-225s** -- a real leak develops far faster (or breaches sooner) than the synthetic generator modeled. This is a much thinner safety margin than the synthetic numbers implied, and it's the number that actually matters for "can the controller act in time."
+- **`POD_KILL` recall is 0.0, exactly as Part 5.4 predicts** ("~0s ← expected, reported on purpose") -- it's instantaneous, there's no window to catch. Not a bug, not tunable away.
+
+The new pick is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
 
 ### 5.3 Calibrate expectations before you start
 
@@ -319,8 +324,8 @@ The curve shows accuracy rising as failure approaches. It quantifies the tradeof
 - [x] Warm-up suppression working (`WARMUP_TICKS`)
 - [x] Post-restart suppression (`on_restart()`) verified (`ml/test_restart_suppression.py`): fires without it, fully suppressed with it for the full window
 - [x] Parameter sweep run (24 combos, `ml/tune.py`); configuration chosen deliberately -- see Part 5.2.1
-- [x] Per-fault recall and lead-time table (from the sweep, against the bundled sample fixture)
-- [x] False positives per hour -- from the sample fixture, and re-checked against a 70/30 held-out split of the real `data/healthy/metrics.parquet`: 0 fires across 3.75h of held-out real data. Still no real chaos data to measure real recall/lead-time against, though.
+- [x] Per-fault recall and lead-time table -- from the sample fixture initially, now superseded by a real run against `data/healthy/` + `data/chaos/` (Part 5.2.1): CPU_HOG 0.42/260s, DISK_STRESS 0.17/262s, MEMORY_LEAK 0.42/11s, POD_KILL 0.0 (expected)
+- [x] False positives per hour -- 0.71/hr on real data (clean stretches within `data/chaos/`), plus the earlier 0-fire result on a held-out split of real healthy data alone
 - [x] The score-over-time plot for one ramping leak (`ml/plot_leak.py` -> `ml/memory_leak_example.png`)
 - [ ] Model file shipped (`ml/detector.pkl` via `ml/fit_detector.py`, frozen `score()`/`on_restart()` interface documented in `ml/README.md`) -- not yet wired into a live loop, because no such loop exists in `control/controller.py` yet (that's Shravan's piece to build)
 

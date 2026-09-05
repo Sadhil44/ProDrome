@@ -11,7 +11,8 @@ import itertools
 
 import pandas as pd
 
-from ml.replay import fault_mask, firing_events, train_and_replay
+from ml.detector import Detector
+from ml.replay import fault_mask, firing_events, replay, train_and_replay
 
 ALPHAS = [0.1, 0.3]
 THRESHOLDS = [2.5, 3.0, 4.0]
@@ -85,6 +86,37 @@ def sweep(metrics: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for alpha, threshold, k, n in itertools.product(ALPHAS, THRESHOLDS, KS, NS):
         rows.append(evaluate_config(alpha, threshold, k, n, healthy, metrics, labels))
+    return pd.DataFrame(rows)
+
+
+def evaluate_config_real(alpha, threshold, k, n, real_healthy, chaos_metrics, chaos_labels) -> dict:
+    """For genuinely separate healthy/chaos files (no time overlap) -- fit
+    on real_healthy, replay chaos_metrics fresh. Unlike evaluate_config,
+    this is safe to use fit_healthy + replay for (see ml.replay's
+    module docstring on when each is correct)."""
+    det = Detector.fit_healthy(real_healthy, alpha=alpha, threshold=threshold, k=k, n=n)
+    log = replay(det, chaos_metrics)
+    events = firing_events(log)
+
+    matched = _match_events_to_labels(events, chaos_labels)
+    clean_within_chaos = chaos_metrics[~fault_mask(chaos_metrics, chaos_labels)]
+    fp_per_hour = _false_positive_rate(events, chaos_labels, clean_within_chaos)
+
+    row = {"alpha": alpha, "threshold": threshold, "k": k, "n": n, "fp_per_hour": round(fp_per_hour, 2)}
+    for fault_type, group in matched.groupby("fault_type"):
+        recall = group["detected"].mean()
+        lead_times = group.loc[group["detected"], "lead_time_s"].astype(float)
+        median_lead = lead_times.median() if not lead_times.empty else float("nan")
+        row[f"{fault_type}_recall"] = round(recall, 2)
+        row[f"{fault_type}_lead_s"] = round(median_lead, 1) if pd.notna(median_lead) else float("nan")
+
+    return row
+
+
+def sweep_real(real_healthy: pd.DataFrame, chaos_metrics: pd.DataFrame, chaos_labels: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for alpha, threshold, k, n in itertools.product(ALPHAS, THRESHOLDS, KS, NS):
+        rows.append(evaluate_config_real(alpha, threshold, k, n, real_healthy, chaos_metrics, chaos_labels))
     return pd.DataFrame(rows)
 
 
