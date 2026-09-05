@@ -38,7 +38,13 @@ STD_FLOOR = 1e-6               # avoids divide-by-zero on constant metrics
 
 K_OF_N_METRICS = 3             # how many metrics must be anomalous at once
 N_CONSECUTIVE = 1              # how many consecutive ticks that must hold
-MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (e.g. restarts) are dropped
+MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (perfectly constant) are dropped
+# A metric can be "almost always constant, rare tiny blip" (restarts; net_tx on a
+# loopback-only workload) without ever tripping the variance check above -- and a
+# fixed variance cutoff can't generalize across metrics measured in different units
+# anyway. Drop a metric if it sits at its single most common value more than this
+# fraction of the time, regardless of that value's raw variance.
+MAX_MODE_FRACTION = 0.98
 POST_RESTART_SUPPRESS_TICKS = 32  # ~8 minutes at 15s ticks (Part 4.4)
 
 # A fault that only ever disturbs one metric (e.g. a pure CPU hog) can
@@ -176,9 +182,15 @@ class Detector:
         callers decide how ticks get fed in."""
         det = cls()
         for workload, group in healthy.groupby("workload"):
-            active_metrics = [
-                m for m in METRICS if group[m].astype(float).var() > MIN_HEALTHY_VARIANCE
-            ]
+            active_metrics = []
+            for m in METRICS:
+                values = group[m].astype(float)
+                if values.var() <= MIN_HEALTHY_VARIANCE:
+                    continue
+                mode_fraction = (values == values.mode().iloc[0]).mean()
+                if mode_fraction > MAX_MODE_FRACTION:
+                    continue
+                active_metrics.append(m)
             det.workloads[workload] = WorkloadDetector(
                 active_metrics, k=k, n=n, alpha=alpha, threshold=threshold
             )

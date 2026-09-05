@@ -318,10 +318,10 @@ The curve shows accuracy rising as failure approaches. It quantifies the tradeof
 - [x] Zero-variance metrics identified and dropped (`MIN_HEALTHY_VARIANCE` guard in `Detector._init_workloads`)
 - [x] Warm-up suppression working (`WARMUP_TICKS`)
 - [ ] Post-restart suppression (`on_restart()`) implemented but not yet tested against a real restart scenario
-- [ ] Parameter sweep run (24 combos, `ml/tune.py`) -- configuration not yet chosen deliberately
+- [x] Parameter sweep run (24 combos, `ml/tune.py`); configuration chosen deliberately -- see Part 5.2.1
 - [x] Per-fault recall and lead-time table (from the sweep, against the bundled sample fixture)
 - [x] False positives per hour -- computed from the sample fixture's healthy ticks, not yet from Shaurya's dedicated clean runs (don't exist yet)
-- [ ] The score-over-time plot for one ramping leak
+- [x] The score-over-time plot for one ramping leak (`ml/plot_leak.py` -> `ml/memory_leak_example.png`)
 - [ ] Model file running in Shravan's live loop
 
 
