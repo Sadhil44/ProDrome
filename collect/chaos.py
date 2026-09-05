@@ -218,7 +218,7 @@ def _recover(seconds: int, label: str = "recovery") -> None:
         time.sleep(seconds)
 
 
-def _plan(rounds: int = 1) -> list[dict]:
+def _plan(rounds: int = 1, fault_types: list[str] | None = None) -> list[dict]:
     """The full campaign as an ordered list of steps, each with a stable run_id.
     Deterministic (incl. which 2 workloads get pod-killed) so a re-run resumes
     cleanly instead of duplicating or renumbering.
@@ -226,10 +226,20 @@ def _plan(rounds: int = 1) -> list[dict]:
     `rounds` repeats the whole schedule N times -- run_ids just keep counting
     (CPU_HOG_constant_redis_001, _002, ...), so `--rounds 3` after a `--rounds 1`
     run resumes and adds rounds 2-3. More rounds = multiple runs per fault type,
-    which is what lets Sadhil split train/test by run (guide 5.6)."""
+    which is what lets Sadhil split train/test by run (guide 5.6).
+
+    `fault_types` restricts the FAULTS loop to a subset (e.g. ["DISK_STRESS"]
+    to top up just one fault type that turned out contaminated -- see guide
+    5.5/eval/README.md) and skips the clean/pod-kill blocks entirely, since a
+    targeted top-up shouldn't add more of those. Numbering still starts at
+    _001 for that fault, so it resumes past whatever's already in runs.csv
+    exactly like a full-schedule rerun does -- existing (contaminated) runs
+    for that fault get skipped by campaign()'s normal resume check, and only
+    genuinely new ones run."""
     steps: list[dict] = []
     seen: dict[tuple, int] = {}
     clean_i = 0
+    faults = fault_types if fault_types else FAULTS
     killed = random.Random(0).sample(WORKLOADS, 2)
 
     def rid(fault: str, workload: str, pattern: str) -> str:
@@ -238,11 +248,13 @@ def _plan(rounds: int = 1) -> list[dict]:
         return f"{fault}_{pattern}_{workload}_{seen[key]:03d}"
 
     for _ in range(rounds):
-        for workload in WORKLOADS:                    # 18 fault runs / round
-            for fault in FAULTS:
+        for workload in WORKLOADS:
+            for fault in faults:
                 for pattern in PATTERNS:
                     steps.append(dict(kind="fault", fault=fault, workload=workload,
                                       pattern=pattern, run_id=rid(fault, workload, pattern)))
+        if fault_types:
+            continue                                  # targeted top-up: skip clean/pod-kill
         for _ in range(4):                            # 4 fault-free windows / round
             clean_i += 1
             steps.append(dict(kind="clean", run_id=f"CLEAN_{clean_i:03d}"))
@@ -265,14 +277,15 @@ def _append(rec: dict, outdir: str) -> None:
             labels_p, mode="a", header=not labels_p.exists(), index=False)
 
 
-def campaign(duration: int, gap: int, ns: str, outdir: str, rounds: int = 1) -> None:
+def campaign(duration: int, gap: int, ns: str, outdir: str, rounds: int = 1,
+            fault_types: list[str] | None = None) -> None:
     done: set[str] = set()
     runs_p = Path(outdir) / "runs.csv"
     if runs_p.exists():
         done = set(pd.read_csv(runs_p)["run_id"])
         print(f"resuming -- {len(done)} runs already in {runs_p}, skipping those\n")
 
-    for step in _plan(rounds):
+    for step in _plan(rounds, fault_types):
         if step["run_id"] in done:
             print(f"  skip {step['run_id']} (done)")
             continue
@@ -317,6 +330,9 @@ def main() -> None:
     ap.add_argument("--gap", type=int, default=DEFAULT_GAP)
     ap.add_argument("--rounds", type=int, default=1,
                     help="repeat the whole schedule N times (~2.5h each); more runs per fault type")
+    ap.add_argument("--fault-types", default=None,
+                    help="comma-separated subset (e.g. DISK_STRESS) to top up just that fault "
+                         "type; skips clean/pod-kill runs")
     ap.add_argument("--namespace", default=NAMESPACE)
     ap.add_argument("--outdir", default="data/chaos")
     args = ap.parse_args()
@@ -333,7 +349,8 @@ def main() -> None:
         # runs.csv / labels.csv are appended after every run, so a crash is
         # recoverable: just re-run --campaign and it skips what's already done.
         # To start over, delete data/chaos/ first.
-        campaign(args.duration, args.gap, args.namespace, args.outdir, args.rounds)
+        fault_types = args.fault_types.split(",") if args.fault_types else None
+        campaign(args.duration, args.gap, args.namespace, args.outdir, args.rounds, fault_types)
         finish(args.outdir)
     else:
         ap.error("pass --campaign or --one FAULT WORKLOAD [PATTERN]")
