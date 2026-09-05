@@ -233,17 +233,20 @@ Lower thresholds → more firings → higher recall, lower precision. Higher →
 
 | | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK | POD_KILL |
 |---|---|---|---|---|---|---|---|---|---|
-| Old pick, on real data | 0.1 | 2.5 | **3** | 1 | 0.27 | 0.42 recall, 260s lead | **0.00 recall** | **0.00 recall** | 0.0 |
-| **New pick (chosen default)** | 0.1 | 2.5 | **2** | 1 | 0.71 | 0.42 recall, 260s lead | 0.17 recall, 262s lead | 0.42 recall, **11s lead** | 0.0 |
+| Synthetic-fixture pick, on real data | 0.1 | 2.5 | 3 | 1 | 0.27 | 0.42 recall, 260s lead | **0.00 recall** | **0.00 recall** | 0.0 |
+| First real-data pick | 0.1 | 2.5 | 2 | 1 | 0.71 | 0.42 recall, 260s lead | 0.17 recall, 262s lead | 0.42 recall, 11s lead | 0.0 |
+| **Balanced (chosen default)** | 0.1 | **2.0** | 2 | 1 | 1.79 | 0.50 recall, 269s lead | 0.33 recall, 236s lead | 0.58 recall, **27s lead** | 0.0 |
+| **Sensitivity-leaning alternate** | 0.1 | **1.5** | **1** | 1 | 5.00 | 0.58 recall, 276s lead | 0.58 recall, 272s lead | 0.75 recall, **42s lead** | 0.25 recall, 5s |
 
-**What changed and why:** `k=3` measured well on the synthetic fixture because the generator stylizes each fault to move several metrics together in a clean, correlated way. Real `DISK_STRESS` and `MEMORY_LEAK` don't correlate across metrics nearly as cleanly, so requiring 3 simultaneous anomalous metrics was too strict to ever fire on them at all -- `k=2` is the best balance actually found on real data.
+**What changed and why, in two steps:** `k=3` measured well on the synthetic fixture because the generator stylizes each fault to move several metrics together cleanly; real `DISK_STRESS`/`MEMORY_LEAK` don't correlate across metrics that cleanly, so `k=3` never fired on either (0.0 recall) -- dropping to `k=2` fixed that. Separately, a finer real-data sweep (lower thresholds, `k=1`) showed threshold is the more powerful lever than k once k=2 is already in place: `threshold=2.0` meaningfully improves every fault type's recall and more than doubles `MEMORY_LEAK` lead time (11s -> 27s), for a real but modest fp cost (0.71 -> 1.79/hr, roughly one false alarm per 34 minutes). Pushing further to `threshold=1.5, k=1` buys still more recall and lead time but at 5.00 fp/hr -- probably too disruptive to ship as the default (that's a false controller action roughly every 12 minutes), so it's recorded as the explicit alternate Part 5.2 asks for rather than adopted.
 
 **What real data revealed, not just retuned:**
-- **Recall is lower across the board on real data** (0.17-0.42 vs. 0.50-0.83 synthetic) -- report this per fault type, not as one aggregate (ground rule #6).
-- **Real `MEMORY_LEAK` lead time is ~11-27s, not ~165-225s** -- a real leak develops far faster (or breaches sooner) than the synthetic generator modeled. This is a much thinner safety margin than the synthetic numbers implied, and it's the number that actually matters for "can the controller act in time."
-- **`POD_KILL` recall is 0.0, exactly as Part 5.4 predicts** ("~0s ← expected, reported on purpose") -- it's instantaneous, there's no window to catch. Not a bug, not tunable away.
+- **A genuine precision/recall tradeoff finally shows up** (fp/hr from 0.71 to 5.00 across the rows above) -- the synthetic fixture was too small to ever show this (Part 5.2's original caveat).
+- **Recall is lower across the board on real data** than the synthetic fixture ever suggested -- report per fault type, not as one aggregate (ground rule #6).
+- **Real `MEMORY_LEAK` lead time tops out around 27-42s, not the ~165-225s the synthetic fixture implied** -- a real leak develops far faster (or breaches sooner) than the generator modeled. This is the number that actually matters for "can the controller act in time," and it's a much thinner margin than the synthetic result suggested.
+- **`POD_KILL` recall is 0.0 at the chosen default, exactly as Part 5.4 predicts** ("~0s ← expected, reported on purpose") -- it's instantaneous, there's no window to catch. The 0.25 recall at the aggressive alternate is almost certainly catching the aftermath within one tick, not real warning, and shouldn't be read as "the detector predicted a pod kill."
 
-The new pick is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
+The balanced pick is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
 
 ### 5.3 Calibrate expectations before you start
 

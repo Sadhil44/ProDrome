@@ -24,16 +24,19 @@ import pandas as pd
 from ml.features import METRICS
 
 # Chosen via the Part 5.1 sweep against REAL data/healthy + data/chaos
-# (see docs/guides/sagar.md Part 5.2.1). The earlier synthetic-only pick
-# used k=3, which measured well on the sample fixture but collapsed to
-# 0.0 recall on DISK_STRESS and MEMORY_LEAK against real data -- real
-# faults don't correlate across metrics as cleanly as the generator
-# stylized them. k=2 is the best real-data balance found.
+# (see docs/guides/sagar.md Part 5.2.1). Two real findings, not just
+# retuning: (1) k=3 (the synthetic-fixture pick) collapses to 0.0 recall
+# on DISK_STRESS/MEMORY_LEAK against real data -- real faults don't
+# correlate across metrics as cleanly as the generator stylized them.
+# (2) lowering the threshold from 2.5 to 2.0 meaningfully improves real
+# recall and more than doubles MEMORY_LEAK lead time (11s -> 27s), at
+# a real fp cost (0.71 -> 1.79 fp/hr) -- the balanced pick, not the
+# more aggressive "sensitivity-leaning" alternate also on record there.
 ALPHA = 0.1                    # EWMA prediction responsiveness
 ERROR_HISTORY = 100            # ticks of error history kept per metric
 WARMUP_TICKS = 30              # ticks before a metric starts scoring
 RECENT_WINDOW = 5              # "recent" errors compared against the full history
-Z_THRESHOLD = 2.5              # std devs of error above typical -> anomalous
+Z_THRESHOLD = 2.0              # std devs of error above typical -> anomalous
 STD_FLOOR = 1e-6               # avoids divide-by-zero on constant metrics
 
 K_OF_N_METRICS = 2             # how many metrics must be anomalous at once
