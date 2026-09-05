@@ -1,5 +1,5 @@
 fault_type,runs,contaminated,recall_raw,recall_excl_dead_zone,median_lead_s,recovery_ours_s,recovery_control_s
 CPU_HOG,30,0,0.667,0.667,273.0,N/A,N/A
-DISK_STRESS,30,30,0.0,,,N/A,N/A
+DISK_STRESS,90,30,0.389,0.583,184.7,N/A,N/A
 MEMORY_LEAK,30,15,0.4,0.8,32.2,N/A,N/A
 POD_KILL,10,0,0.0,0.0,,N/A,N/A
