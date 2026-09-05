@@ -317,12 +317,12 @@ The curve shows accuracy rising as failure approaches. It quantifies the tradeof
 - [x] Detector fit only on healthy data (`Detector.fit_healthy` / `train_and_replay`'s healthy-only `update()` calls)
 - [x] Zero-variance metrics identified and dropped (`MIN_HEALTHY_VARIANCE` guard in `Detector._init_workloads`)
 - [x] Warm-up suppression working (`WARMUP_TICKS`)
-- [ ] Post-restart suppression (`on_restart()`) implemented but not yet tested against a real restart scenario
+- [x] Post-restart suppression (`on_restart()`) verified (`ml/test_restart_suppression.py`): fires without it, fully suppressed with it for the full window
 - [x] Parameter sweep run (24 combos, `ml/tune.py`); configuration chosen deliberately -- see Part 5.2.1
 - [x] Per-fault recall and lead-time table (from the sweep, against the bundled sample fixture)
-- [x] False positives per hour -- computed from the sample fixture's healthy ticks, not yet from Shaurya's dedicated clean runs (don't exist yet)
+- [x] False positives per hour -- from the sample fixture, and re-checked against a 70/30 held-out split of the real `data/healthy/metrics.parquet`: 0 fires across 3.75h of held-out real data. Still no real chaos data to measure real recall/lead-time against, though.
 - [x] The score-over-time plot for one ramping leak (`ml/plot_leak.py` -> `ml/memory_leak_example.png`)
-- [ ] Model file running in Shravan's live loop
+- [ ] Model file shipped (`ml/detector.pkl` via `ml/fit_detector.py`, frozen `score()`/`on_restart()` interface documented in `ml/README.md`) -- not yet wired into a live loop, because no such loop exists in `control/controller.py` yet (that's Shravan's piece to build)
 
 
 ---
