@@ -152,6 +152,8 @@ A platform or SRE engineer running services on Kubernetes, who is currently page
 | FR-22 | Collect its own baseline automatically on install, with no manual training step | Should |
 | FR-23 | Provide a dashboard showing live state and decision history | Should |
 
+FR-23's terminal implementation lives in `dashboard/` (`dashboard/terminal.py`) — see `dashboard/README.md` for why the web version is intentionally not built yet (Phase 5, per §10; building it now would cost real time for something with no users and a working terminal equivalent already).
+
 ---
 
 ## 6. Non-functional requirements
