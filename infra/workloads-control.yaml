@@ -165,10 +165,10 @@ spec:
           resources:
             requests:
               memory: "256Mi"
-              cpu: "200m"
+              cpu: "400m"
             limits:
               memory: "512Mi"
-              cpu: "500m"
+              cpu: "1000m"   # keep identical to infra/workloads.yaml -- see note there
 
           readinessProbe:
             exec:

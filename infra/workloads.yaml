@@ -165,10 +165,10 @@ spec:
           resources:
             requests:
               memory: "256Mi"
-              cpu: "200m"
+              cpu: "400m"
             limits:
               memory: "512Mi"
-              cpu: "500m"
+              cpu: "1000m"   # 500m pegs flat under any pgbench load; 1 core gives CPU a diurnal rhythm + fault headroom
 
           readinessProbe:
             exec:

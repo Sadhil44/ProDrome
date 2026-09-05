@@ -29,5 +29,10 @@ This isn't an oversight — it's the guide's explicit call, and worth repeating 
 ## Definition of done (terminal, current scope)
 
 - [x] Reads `control/decisions.csv`, matches the columns `control/controller.py` actually writes
+  (verified directly: `log_decision()`'s header row and `terminal.py`'s `COLUMNS` are
+  identical, same order)
 - [x] Handles the "controller hasn't run yet" case without crashing
+- [x] Renders correctly against fabricated decisions matching the real schema (both
+  states checked: no file yet, and a populated log with mixed `fired`/`NORMAL` rows,
+  newest-first)
 - [ ] Verified against a live controller loop once one exists (currently `control/controller.py` has the individual action-building blocks but not the wired-up loop yet)

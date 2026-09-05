@@ -6,3 +6,6 @@ data/*
 __pycache__/
 .DS_Store
 control/decisions.csv
+
+# k6 run logs (regenerated every load run)
+collect/load/k6-*.log

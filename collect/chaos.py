@@ -25,6 +25,10 @@ Outputs (data/chaos/):
                  blank for CPU_HOG / DISK_STRESS, which don't fail) -- for the
                  Part 7 eval harness. Not a cross-pair contract; shape is mine.
 
+Both files are APPENDED after every run, so a crash partway through is
+recoverable: re-run `--campaign` and it skips the runs already in runs.csv.
+To start a fresh campaign, delete data/chaos/ first.
+
 Metrics are NOT collected here. After the campaign, export the window with the
 Part 3.2 scraper (this script prints the exact command):
 
@@ -60,6 +64,8 @@ DEFAULT_DURATION = 300   # 5 min per run (guide 5.5)
 DEFAULT_GAP = 120        # recovery between runs
 
 LABEL_COLUMNS = ["start_ts", "end_ts", "workload", "fault_type", "pattern", "run_id"]
+RUNS_COLUMNS = ["run_id", "run_type", "workload", "fault_type", "pattern",
+                "start_ts", "end_ts", "failure_ts", "restarts_delta"]
 
 
 def _now() -> pd.Timestamp:
@@ -212,64 +218,106 @@ def _recover(seconds: int, label: str = "recovery") -> None:
         time.sleep(seconds)
 
 
-def campaign(duration: int, gap: int, ns: str) -> tuple[list[dict], pd.Timestamp, pd.Timestamp]:
-    manifest: list[dict] = []
-    seen: dict[tuple, int] = {}
+def _plan(rounds: int = 1, fault_types: list[str] | None = None) -> list[dict]:
+    """The full campaign as an ordered list of steps, each with a stable run_id.
+    Deterministic (incl. which 2 workloads get pod-killed) so a re-run resumes
+    cleanly instead of duplicating or renumbering.
 
-    def run_id(fault: str, workload: str, pattern: str) -> str:
+    `rounds` repeats the whole schedule N times -- run_ids just keep counting
+    (CPU_HOG_constant_redis_001, _002, ...), so `--rounds 3` after a `--rounds 1`
+    run resumes and adds rounds 2-3. More rounds = multiple runs per fault type,
+    which is what lets Sadhil split train/test by run (guide 5.6).
+
+    `fault_types` restricts the FAULTS loop to a subset (e.g. ["DISK_STRESS"]
+    to top up just one fault type that turned out contaminated -- see guide
+    5.5/eval/README.md) and skips the clean/pod-kill blocks entirely, since a
+    targeted top-up shouldn't add more of those. Numbering still starts at
+    _001 for that fault, so it resumes past whatever's already in runs.csv
+    exactly like a full-schedule rerun does -- existing (contaminated) runs
+    for that fault get skipped by campaign()'s normal resume check, and only
+    genuinely new ones run."""
+    steps: list[dict] = []
+    seen: dict[tuple, int] = {}
+    clean_i = 0
+    faults = fault_types if fault_types else FAULTS
+    killed = random.Random(0).sample(WORKLOADS, 2)
+
+    def rid(fault: str, workload: str, pattern: str) -> str:
         key = (fault, pattern, workload)
         seen[key] = seen.get(key, 0) + 1
         return f"{fault}_{pattern}_{workload}_{seen[key]:03d}"
 
-    session_start = _now()
-
-    print("== 18 fault runs ==")
-    for workload in WORKLOADS:
-        for fault in FAULTS:
-            for pattern in PATTERNS:
-                rec = run_fault(fault, workload, pattern, duration, ns)
-                rec["run_id"] = run_id(fault, workload, pattern)
-                rec["run_type"] = "fault"
-                manifest.append(rec)
-                _recover(gap)
-
-    print("== 4 clean runs (fault-free windows for the false-positive measurement) ==")
-    for i in range(4):
-        start = _now()
-        _recover(duration, "clean window")
-        manifest.append(dict(start_ts=start, end_ts=_now(), workload="", fault_type="NONE",
-                             pattern="none", run_id=f"CLEAN_{i + 1:03d}", run_type="clean",
-                             restarts_delta=0))
-        _recover(gap)
-
-    print("== 2 pod kills ==")
-    for workload in random.sample(WORKLOADS, 2):
-        rec = run_pod_kill(workload, ns)
-        rec["run_id"] = run_id("POD_KILL", workload, "none")
-        rec["run_type"] = "fault"
-        manifest.append(rec)
-        _recover(gap)
-
-    return manifest, session_start, _now()
+    for _ in range(rounds):
+        for workload in WORKLOADS:
+            for fault in faults:
+                for pattern in PATTERNS:
+                    steps.append(dict(kind="fault", fault=fault, workload=workload,
+                                      pattern=pattern, run_id=rid(fault, workload, pattern)))
+        if fault_types:
+            continue                                  # targeted top-up: skip clean/pod-kill
+        for _ in range(4):                            # 4 fault-free windows / round
+            clean_i += 1
+            steps.append(dict(kind="clean", run_id=f"CLEAN_{clean_i:03d}"))
+        for workload in killed:                       # 2 pod kills / round
+            steps.append(dict(kind="fault", fault="POD_KILL", workload=workload,
+                              pattern="none", run_id=rid("POD_KILL", workload, "none")))
+    return steps
 
 
-def write(manifest: list[dict], session_start: pd.Timestamp, session_end: pd.Timestamp,
-          outdir: str) -> None:
+def _append(rec: dict, outdir: str) -> None:
+    """Append one finished run to runs.csv (and labels.csv if it's a fault), writing
+    headers on first touch. A crash mid-campaign then keeps everything done so far."""
     Path(outdir).mkdir(parents=True, exist_ok=True)
-    runs = pd.DataFrame(manifest).reindex(
-        columns=["run_id", "run_type", "workload", "fault_type", "pattern",
-                 "start_ts", "end_ts", "failure_ts", "restarts_delta"])
-    runs.to_csv(f"{outdir}/runs.csv", index=False)
-    # labels.csv is the frozen SETUP.md 7 contract -- exactly these six columns.
-    labels = runs[runs["run_type"] == "fault"][LABEL_COLUMNS].reset_index(drop=True)
-    labels.to_csv(f"{outdir}/labels.csv", index=False)
+    runs_p = Path(outdir) / "runs.csv"
+    pd.DataFrame([{c: rec.get(c) for c in RUNS_COLUMNS}]).to_csv(
+        runs_p, mode="a", header=not runs_p.exists(), index=False)
+    if rec.get("run_type") == "fault":
+        labels_p = Path(outdir) / "labels.csv"       # frozen SETUP.md 7 contract
+        pd.DataFrame([{c: rec[c] for c in LABEL_COLUMNS}]).to_csv(
+            labels_p, mode="a", header=not labels_p.exists(), index=False)
 
-    print(f"\nwrote {outdir}/labels.csv  ({len(labels)} fault runs)")
-    print(f"wrote {outdir}/runs.csv    ({len(runs)} runs incl. {(runs.run_type == 'clean').sum()} clean)")
-    print(f"\ncampaign window (UTC): {session_start.isoformat()}  ..  {session_end.isoformat()}")
+
+def campaign(duration: int, gap: int, ns: str, outdir: str, rounds: int = 1,
+            fault_types: list[str] | None = None) -> None:
+    done: set[str] = set()
+    runs_p = Path(outdir) / "runs.csv"
+    if runs_p.exists():
+        done = set(pd.read_csv(runs_p)["run_id"])
+        print(f"resuming -- {len(done)} runs already in {runs_p}, skipping those\n")
+
+    for step in _plan(rounds, fault_types):
+        if step["run_id"] in done:
+            print(f"  skip {step['run_id']} (done)")
+            continue
+        if step["kind"] == "clean":
+            start = _now()
+            _recover(duration, f"{step['run_id']} -- clean window")
+            rec = dict(start_ts=start, end_ts=_now(), workload="", fault_type="NONE",
+                       pattern="none", run_type="clean", restarts_delta=0, failure_ts=None)
+        elif step["fault"] == "POD_KILL":
+            rec = run_pod_kill(step["workload"], ns)
+            rec["run_type"] = "fault"
+        else:
+            rec = run_fault(step["fault"], step["workload"], step["pattern"], duration, ns)
+            rec["run_type"] = "fault"
+        rec["run_id"] = step["run_id"]
+        _append(rec, outdir)
+        _recover(gap)
+
+
+def finish(outdir: str) -> None:
+    """Read back what the campaign wrote and print the metrics-export command."""
+    runs = pd.read_csv(f"{outdir}/runs.csv", parse_dates=["start_ts", "end_ts"])
+    labels = pd.read_csv(f"{outdir}/labels.csv", parse_dates=["start_ts", "end_ts"])
+    start = runs["start_ts"].min() - pd.Timedelta(seconds=90)   # rate() needs a warmup lead
+    end = runs["end_ts"].max() + pd.Timedelta(seconds=60)
+
+    print(f"\n{outdir}/labels.csv  -- {len(labels)} fault runs")
+    print(f"{outdir}/runs.csv    -- {len(runs)} runs incl. {(runs.run_type == 'clean').sum()} clean")
+    print(f"\ncampaign window (UTC): {start.isoformat()}  ..  {end.isoformat()}")
     print("export the metrics for this window:\n")
-    print(f"  python collect/scrape.py --start {session_start.isoformat()} \\")
-    print(f"      --end {session_end.isoformat()} --out {outdir}/metrics.parquet")
+    print(f"  python collect/scrape.py --start {start.isoformat()} \\")
+    print(f"      --end {end.isoformat()} --out {outdir}/metrics.parquet")
 
 
 def main() -> None:
@@ -280,6 +328,11 @@ def main() -> None:
                     help="single run: FAULT WORKLOAD [PATTERN]  (PATTERN omitted for POD_KILL)")
     ap.add_argument("--duration", type=int, default=DEFAULT_DURATION)
     ap.add_argument("--gap", type=int, default=DEFAULT_GAP)
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="repeat the whole schedule N times (~2.5h each); more runs per fault type")
+    ap.add_argument("--fault-types", default=None,
+                    help="comma-separated subset (e.g. DISK_STRESS) to top up just that fault "
+                         "type; skips clean/pod-kill runs")
     ap.add_argument("--namespace", default=NAMESPACE)
     ap.add_argument("--outdir", default="data/chaos")
     args = ap.parse_args()
@@ -293,8 +346,12 @@ def main() -> None:
             pattern = args.one[2] if len(args.one) > 2 else "constant"
             print(run_fault(fault, workload, pattern, args.duration, args.namespace))
     elif args.campaign:
-        manifest, start, end = campaign(args.duration, args.gap, args.namespace)
-        write(manifest, start, end, args.outdir)
+        # runs.csv / labels.csv are appended after every run, so a crash is
+        # recoverable: just re-run --campaign and it skips what's already done.
+        # To start over, delete data/chaos/ first.
+        fault_types = args.fault_types.split(",") if args.fault_types else None
+        campaign(args.duration, args.gap, args.namespace, args.outdir, args.rounds, fault_types)
+        finish(args.outdir)
     else:
         ap.error("pass --campaign or --one FAULT WORKLOAD [PATTERN]")
 

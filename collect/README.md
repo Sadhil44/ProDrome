@@ -49,9 +49,11 @@ rate(container_cpu_usage_seconds_total{namespace="prodrome",container!=""}[1m])
 container_memory_working_set_bytes{namespace="prodrome",container!=""}
 
 # 3  mem_pct     — memory as a fraction of the limit  (the most useful one)
-container_memory_working_set_bytes{namespace="prodrome",container!=""}
+max by (namespace,pod,container) (
+  container_memory_working_set_bytes{namespace="prodrome",container!=""})
   / on(namespace,pod,container)
-kube_pod_container_resource_limits{namespace="prodrome",resource="memory"}
+max by (namespace,pod,container) (
+  kube_pod_container_resource_limits{namespace="prodrome",resource="memory"})
 
 # 4  net_rx      — receive bytes/sec, summed across interfaces
 sum by (namespace,pod) (
@@ -69,8 +71,9 @@ rate(container_fs_reads_bytes_total{namespace="prodrome",container!=""}[1m])
 # 7  fs_writes   — disk write bytes/sec
 rate(container_fs_writes_bytes_total{namespace="prodrome",container!=""}[1m])
 
-# 8  restarts    — cumulative container restarts
-kube_pod_container_status_restarts_total{namespace="prodrome"}
+# 8  restarts    — container restarts in the last minute (0/1, transient)
+max by (namespace,pod,container) (
+  changes(kube_pod_container_status_restarts_total{namespace="prodrome"}[1m]))
 ```
 
 Stable workload name (`redis` / `nginx` / `postgres`, per §3.3): take it from the
@@ -87,10 +90,11 @@ k8s v1.37 and were adjusted here. **This README is authoritative; the guide is n
 
 | # | Guide §3.1 | Here | Why |
 |---|---|---|---|
-| 3 `mem_pct` | divides by `container_spec_memory_limit_bytes` | divides by `kube_pod_container_resource_limits{resource="memory"}` with an explicit `on(...)` join | `container_spec_memory_limit_bytes` is **not emitted** by this cluster's cAdvisor (dropped under cgroup v2 / recent kubelet). The guide's query returns zero series. The limit now comes from kube-state-metrics instead; the join is needed because the two metrics carry different label sets. |
+| 3 `mem_pct` | divides by `container_spec_memory_limit_bytes` | divides `kube_pod_container_resource_limits{resource="memory"}` via `on(...)` join, both sides wrapped in `max by (namespace,pod,container)` | `container_spec_memory_limit_bytes` is **not emitted** by this cluster's cAdvisor (dropped under cgroup v2 / recent kubelet) — the guide's query returns zero series. The limit now comes from kube-state-metrics; the join needs the two label sets aligned. The `max by (...)` is required for any window with pod restarts (OOMKill / POD_KILL): cAdvisor briefly reports two series per `(ns,pod,container)` during a restart, and a bare `on(...)` join 422s on the duplicate. |
 | 4, 5 `net_rx` / `net_tx` | bare `rate(...)` | wrapped in `sum by (namespace,pod)` | Network counters are per **interface**, so the bare query returns 9 series per pod (27 total), not 1. Summing collapses to one value per workload, which is what the guide's own §1.5 note intends. |
+| 8 `restarts` | raw `kube_pod_container_status_restarts_total` (cumulative) | `changes(...[1m])` — restarts in the last minute | The raw counter only ever climbs: a pod that OOMKills once reads ≥1 for the rest of the run, and its value tracks pod uptime rather than current health. `changes()` is a transient 0/1 that matches how the synthetic generator models the column, so a model trains and tests on the same shape. Also survives the counter reset when POD_KILL swaps the pod. |
 
-Queries 1, 2, 6, 7, 8 are unchanged from the guide.
+Queries 1, 2, 6, 7 are unchanged from the guide.
 
 **Downstream is unaffected.** Sagar and Sadhil consume the output Parquet
 (`ts, workload, cpu_cores, mem_bytes, mem_pct, net_rx, net_tx, fs_reads, fs_writes, restarts`

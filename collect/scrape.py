@@ -44,15 +44,26 @@ QUERIES = {
     "cpu_cores": 'rate(container_cpu_usage_seconds_total{{namespace="{ns}",container!=""}}[1m])',
     "mem_bytes": 'container_memory_working_set_bytes{{namespace="{ns}",container!=""}}',
     "mem_pct": (
-        'container_memory_working_set_bytes{{namespace="{ns}",container!=""}}'
+        # max by (...) on both sides: during a pod restart cAdvisor briefly
+        # reports two series for the same (namespace,pod,container), which makes a
+        # bare `on(...)` join 422 over any window with churn (OOMKills, POD_KILL).
+        'max by (namespace,pod,container) '
+        '(container_memory_working_set_bytes{{namespace="{ns}",container!=""}})'
         " / on(namespace,pod,container) "
-        'kube_pod_container_resource_limits{{namespace="{ns}",resource="memory"}}'
+        'max by (namespace,pod,container) '
+        '(kube_pod_container_resource_limits{{namespace="{ns}",resource="memory"}})'
     ),
     "net_rx": 'sum by (namespace,pod) (rate(container_network_receive_bytes_total{{namespace="{ns}"}}[1m]))',
     "net_tx": 'sum by (namespace,pod) (rate(container_network_transmit_bytes_total{{namespace="{ns}"}}[1m]))',
     "fs_reads": 'rate(container_fs_reads_bytes_total{{namespace="{ns}",container!=""}}[1m])',
     "fs_writes": 'rate(container_fs_writes_bytes_total{{namespace="{ns}",container!=""}}[1m])',
-    "restarts": 'kube_pod_container_status_restarts_total{{namespace="{ns}"}}',
+    # transient "restarts in the last minute" -- NOT the raw cumulative counter,
+    # which only ever climbs (a leaked pod reads >=1 forever after its first
+    # OOMKill) and whose value tracks pod uptime, not current health. `changes()`
+    # is 0 normally, 1 right after a restart, back to 0 -- and it survives the
+    # counter reset when POD_KILL replaces the pod.
+    "restarts": 'max by (namespace,pod,container) '
+                '(changes(kube_pod_container_status_restarts_total{{namespace="{ns}"}}[1m]))',
 }
 
 METRIC_COLUMNS = ["ts", "workload", "cpu_cores", "mem_bytes", "mem_pct",
