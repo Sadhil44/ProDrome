@@ -23,20 +23,20 @@ import pandas as pd
 
 from ml.features import METRICS
 
-# Chosen via the Part 5.1 sweep against REAL data/healthy + data/chaos
-# (see docs/guides/sagar.md Part 5.2.1). Two real findings, not just
-# retuning: (1) k=3 (the synthetic-fixture pick) collapses to 0.0 recall
-# on DISK_STRESS/MEMORY_LEAK against real data -- real faults don't
-# correlate across metrics as cleanly as the generator stylized them.
-# (2) lowering the threshold from 2.5 to 2.0 meaningfully improves real
-# recall and more than doubles MEMORY_LEAK lead time (11s -> 27s), at
-# a real fp cost (0.71 -> 1.79 fp/hr) -- the balanced pick, not the
-# more aggressive "sensitivity-leaning" alternate also on record there.
-ALPHA = 0.1                    # EWMA prediction responsiveness
+# Chosen via the Part 5.1 sweep against REAL data/healthy + data/chaos,
+# corrected (see docs/guides/sagar.md Part 5.2.1). The two earlier real
+# picks here (k=3->k=2, then threshold 2.5->2.0) were computed with a
+# real bug in ml.replay.replay(): it trained on every tick regardless of
+# fault status, so the detector progressively desensitized across the
+# chaos file's many faults -- credit to eval/harness.py for catching
+# this. Once fixed, k=3 no longer collapses on real data at all (it was
+# largely the bug, not real cross-metric decorrelation), and the actual
+# best real-data balance is a much higher threshold with k=2.
+ALPHA = 0.3                    # EWMA prediction responsiveness
 ERROR_HISTORY = 100            # ticks of error history kept per metric
 WARMUP_TICKS = 30              # ticks before a metric starts scoring
 RECENT_WINDOW = 5              # "recent" errors compared against the full history
-Z_THRESHOLD = 2.0              # std devs of error above typical -> anomalous
+Z_THRESHOLD = 4.0              # std devs of error above typical -> anomalous
 STD_FLOOR = 1e-6               # avoids divide-by-zero on constant metrics
 
 K_OF_N_METRICS = 2             # how many metrics must be anomalous at once

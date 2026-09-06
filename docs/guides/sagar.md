@@ -229,22 +229,28 @@ Lower thresholds → more firings → higher recall, lower precision. Higher →
 
 ### 5.2.1 Chosen configuration
 
-**Superseded once (below), then confirmed against real data.** First pass was a 24-combo sweep (`ml/tune.py`) against the bundled `data/samples/metrics.parquet` fixture, which picked `alpha=0.1, threshold=2.5, k=3, n=1` (0.00 fp/hr, 0.83/0.83/0.50 recall). That config was never validated against anything real -- and once `data/healthy/metrics.parquet` + `data/chaos/{metrics.parquet,labels.csv}` landed, re-running the same sweep for real (`Detector.fit_healthy` on real healthy data, `ml.replay.replay` against real chaos data -- safe here since the two files don't overlap in time) showed it collapsing:
+**Revised three times -- the third revision was a bug fix, not a retune, and it's the important one.**
+
+**Pass 1 (synthetic only):** a 24-combo sweep against the bundled `data/samples/metrics.parquet` fixture picked `alpha=0.1, threshold=2.5, k=3, n=1` (0.00 fp/hr, 0.83/0.83/0.50 recall). Never validated against anything real.
+
+**Pass 2 (real data, still buggy):** once `data/healthy/` + `data/chaos/` landed, re-running the sweep for real showed `k=3` collapsing to 0.0 recall on `DISK_STRESS`/`MEMORY_LEAK`, "fixed" by dropping to `k=2`, then further tuned to `threshold=2.0` (1.79 fp/hr, 0.50/0.33/0.58 recall, 27s `MEMORY_LEAK` lead). This looked like a real, if disappointing, finding: real faults don't correlate across metrics as cleanly as the generator stylizes them.
+
+**Pass 3 (the bug):** it wasn't (mostly) a real finding. `ml.replay.replay()` had a real bug -- it called `Detector.score()` -> `WorkloadDetector.update()` on *every* tick regardless of fault status. Fine over one isolated fault, wrong over a chaos file with several faults back-to-back: each fault's abnormal values got folded into the "healthy" reference, so the detector progressively desensitized the further it walked through the file. Credit to `eval/harness.py` for catching this empirically (an isolated fault fires correctly; the same fault scored deep into a multi-fault file doesn't fire at all) and working around it with `replay_no_leakage()`. Fixed in `ml.replay.replay()` itself (now takes `labels` and branches `score_only()`/`update()` exactly like `train_and_replay()`), then re-swept for real:
 
 | | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK | POD_KILL |
 |---|---|---|---|---|---|---|---|---|---|
-| Synthetic-fixture pick, on real data | 0.1 | 2.5 | 3 | 1 | 0.27 | 0.42 recall, 260s lead | **0.00 recall** | **0.00 recall** | 0.0 |
-| First real-data pick | 0.1 | 2.5 | 2 | 1 | 0.71 | 0.42 recall, 260s lead | 0.17 recall, 262s lead | 0.42 recall, 11s lead | 0.0 |
-| **Balanced (chosen default)** | 0.1 | **2.0** | 2 | 1 | 1.79 | 0.50 recall, 269s lead | 0.33 recall, 236s lead | 0.58 recall, **27s lead** | 0.0 |
-| **Sensitivity-leaning alternate** | 0.1 | **1.5** | **1** | 1 | 5.00 | 0.58 recall, 276s lead | 0.58 recall, 272s lead | 0.75 recall, **42s lead** | 0.25 recall, 5s |
+| Pass 2 pick, re-measured after the fix | 0.1 | 2.0 | 2 | 1 | 2.05 | 0.50 recall, 275s lead | 0.33 recall, 144s lead | 0.42 recall, 26s lead | 0.25 |
+| **Balanced (chosen default)** | **0.3** | **4.0** | 2 | 1 | **0.54** | 0.67 recall, 261s lead | 0.33 recall, 283s lead | 0.75 recall, **50s lead** | 0.50, 3s |
+| **Sensitivity-leaning alternate** | 0.3 | 2.0 | 2 | 1 | 2.77 | 0.92 recall, 276s lead | 0.67 recall, 226s lead | 0.58 recall, 42s lead | 0.25, 5s |
 
-**What changed and why, in two steps:** `k=3` measured well on the synthetic fixture because the generator stylizes each fault to move several metrics together cleanly; real `DISK_STRESS`/`MEMORY_LEAK` don't correlate across metrics that cleanly, so `k=3` never fired on either (0.0 recall) -- dropping to `k=2` fixed that. Separately, a finer real-data sweep (lower thresholds, `k=1`) showed threshold is the more powerful lever than k once k=2 is already in place: `threshold=2.0` meaningfully improves every fault type's recall and more than doubles `MEMORY_LEAK` lead time (11s -> 27s), for a real but modest fp cost (0.71 -> 1.79/hr, roughly one false alarm per 34 minutes). Pushing further to `threshold=1.5, k=1` buys still more recall and lead time but at 5.00 fp/hr -- probably too disruptive to ship as the default (that's a false controller action roughly every 12 minutes), so it's recorded as the explicit alternate Part 5.2 asks for rather than adopted.
+`k=3` no longer collapses at all once the bug is fixed (e.g. `alpha=0.3, threshold=4.0, k=3, n=1` gets 0.18 fp/hr with 0.50/0.33/0.67 recall) -- the "real faults don't correlate" story from Pass 2 was substantially the bug talking, not genuine signal. The corrected sweep also found a materially better operating point than either prior pass: higher threshold *and* lower fp *and* better recall across every fault type, which isn't a tradeoff you'd expect from tuning alone -- it's what happens when the measurement itself was broken.
 
-**What real data revealed, not just retuned:**
-- **A genuine precision/recall tradeoff finally shows up** (fp/hr from 0.71 to 5.00 across the rows above) -- the synthetic fixture was too small to ever show this (Part 5.2's original caveat).
-- **Recall is lower across the board on real data** than the synthetic fixture ever suggested -- report per fault type, not as one aggregate (ground rule #6).
-- **Real `MEMORY_LEAK` lead time tops out around 27-42s, not the ~165-225s the synthetic fixture implied** -- a real leak develops far faster (or breaches sooner) than the generator modeled. This is the number that actually matters for "can the controller act in time," and it's a much thinner margin than the synthetic result suggested.
-- **`POD_KILL` recall is 0.0 at the chosen default, exactly as Part 5.4 predicts** ("~0s ← expected, reported on purpose") -- it's instantaneous, there's no window to catch. The 0.25 recall at the aggressive alternate is almost certainly catching the aftermath within one tick, not real warning, and shouldn't be read as "the detector predicted a pod kill."
+**What real data revealed, not just retuned (this part held up across the bug fix):**
+- **A genuine precision/recall tradeoff exists** (0.54 to 2.77 fp/hr across the rows above) -- the synthetic fixture was too small to ever show this.
+- **Real `MEMORY_LEAK` lead time tops out around 42-50s, not the ~165-225s the synthetic fixture implied** -- a real leak develops far faster than the generator modeled. This is the number that matters for "can the controller act in time," and it's a much thinner margin than the synthetic result suggested.
+- **`POD_KILL` recall is nonzero (0.25-0.50) at very short lead (3-5s)** -- this is almost certainly catching the aftermath within one tick as the pod dies, not real advance warning. Don't read it as "the detector predicted a pod kill"; Part 5.4's "~0s, expected" framing is still the honest one.
+
+**Lesson worth keeping, not just the number:** ground rule #8 ("if it isn't reproducible, it isn't a result") applies to the evaluation code too, not just the detector. A surprising real-data finding (recall collapsing) was actually a bug in how the finding was measured -- worth the reflex of asking "is my harness correct" before concluding "the real world is different," especially when the surprise is a clean collapse to exactly 0 rather than a gradual degradation.
 
 The balanced pick is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
 

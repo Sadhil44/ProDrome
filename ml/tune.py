@@ -95,7 +95,7 @@ def evaluate_config_real(alpha, threshold, k, n, real_healthy, chaos_metrics, ch
     this is safe to use fit_healthy + replay for (see ml.replay's
     module docstring on when each is correct)."""
     det = Detector.fit_healthy(real_healthy, alpha=alpha, threshold=threshold, k=k, n=n)
-    log = replay(det, chaos_metrics)
+    log = replay(det, chaos_metrics, chaos_labels)
     events = firing_events(log)
 
     matched = _match_events_to_labels(events, chaos_labels)
