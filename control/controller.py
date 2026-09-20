@@ -1,9 +1,12 @@
 import csv
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import pandas as pd
 from kubernetes import client, config
 from control.policy import decide
+from ml.features import METRICS, WINDOW_SIZE
 
 
 NAMESPACE = "prodrome"
@@ -142,18 +145,24 @@ def kill_switch_active():
     return STOP_FILE.exists()
 
 
-def evaluate_once(apps_api, workload, metrics, detector, classifier):
+def evaluate_once(apps_api, workload, metrics, detector, classifier, history=None):
     """Run one detector/classifier/policy decision and append its audit row.
 
-    ``metrics`` is the detector's per-tick metric mapping. Keeping this small
-    makes the loop usable with Prometheus, a replay, or a test fixture.
+    ``metrics`` is one named metric tick. The detector receives the frozen
+    ordered vector; the classifier receives a full history DataFrame once it
+    has enough ticks to calculate window features.
     """
-    score, fired = detector.score(workload, metrics)
+    score, fired = detector.score(workload, [metrics.get(metric) for metric in METRICS])
     predicted_class, confidence = ("NORMAL", 1.0)
     action = "nothing"
-    if fired:
-        predicted_class, confidence = classifier.predict(metrics)
+    window_ready = history is not None and len(history) >= WINDOW_SIZE
+    if fired and window_ready:
+        predicted_class, confidence = classifier.predict(
+            pd.DataFrame(list(history), columns=METRICS)
+        )
         action = decide(predicted_class, confidence)
+    elif fired:
+        action = "nothing"
 
     result = "not-fired"
     if fired and action != "nothing":
@@ -173,11 +182,16 @@ def evaluate_once(apps_api, workload, metrics, detector, classifier):
 
 
 def run_loop(apps_api, workloads, metrics_source, detector, classifier, interval_seconds=15):
-    """Continuously evaluate workloads; ``metrics_source(name)`` returns a mapping."""
+    """Continuously evaluate workloads with per-workload 20-tick histories."""
     import time
+    histories = defaultdict(lambda: deque(maxlen=WINDOW_SIZE))
     while True:
         for workload in workloads:
-            evaluate_once(apps_api, workload, metrics_source(workload), detector, classifier)
+            metrics = metrics_source(workload)
+            histories[workload].append([metrics.get(metric) for metric in METRICS])
+            evaluate_once(
+                apps_api, workload, metrics, detector, classifier, histories[workload]
+            )
         time.sleep(interval_seconds)
 
 if __name__ == "__main__":
