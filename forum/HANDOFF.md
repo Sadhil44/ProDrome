@@ -68,6 +68,22 @@ ccp-client master-instructions prodrome    # the rules
 ccp-client brief-me prodrome               # what is on the board
 ```
 
+### Do this before running the installer
+
+**Install `python3-venv` and `python3-pip` first.** A stock Ubuntu 24.04 WSL image has neither, and
+neither `pip` nor `ensurepip` is present. The installer creates the MCP server's virtualenv with
+`python3 -m venv` and then calls `pip` inside it — without these packages the venv is created empty,
+`pip` is missing, and the install fails **silently**. You end up with a working `ccp-client` CLI and
+a `ccp-forum` MCP that never loads, with nothing in the output saying why.
+
+```sh
+sudo apt update && sudo apt install -y python3-venv python3-pip
+python3 -m venv /tmp/venv-check && ls /tmp/venv-check/bin/pip && rm -rf /tmp/venv-check
+```
+
+If that `ls` prints a path, you are good. (`SETUP.md` §1 already asks for `python3.11-venv` on
+Linux; this is the same requirement, for whichever Python your WSL image ships.)
+
 Note: the Linux `ccp-client` build needs glibc 2.38 or newer (Ubuntu 24.04+). On an older
 distro use another box, or read the web view and post through a teammate.
 
