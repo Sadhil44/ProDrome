@@ -8,9 +8,13 @@ You decide whether a workload is behaving abnormally and heading for failure. Th
 
 > **Where this fits** (see `PRD.md` §10): everything below is Phase 0–3 work, and unlike Shaurya's guide there's no ordering gotcha — you're never blocked on a cluster, so you can start immediately once Shaurya's Phase 0 synthetic generator (or `data/samples/`) exists. Part 8's later-phases items are Phase 5–6.
 >
-> **Repo status right now:** nothing in `ml/detector.py` or a shared feature file exists yet. Sadhil has already written a *provisional* windowing function (`ml/dataset.py`'s `windows()`) and a 40-feature summarizer (`ml/features.py`), explicitly flagged as standing in for your canonical shared feature file until it exists — worth reading before you start, so you're reconciling into something rather than duplicating it from scratch. No real or synthetic data exists yet either (Shaurya hasn't built the Phase 0 generator), so nothing you build can be tuned against real numbers yet.
+> **Repo status right now (updated 2026-09-19):** Phases 0–3 of your track are done. The detector (`ml/detector.py`), replay harness (`ml/replay.py`), sweep (`ml/tune.py`), shipped artifact (`ml/fit_detector.py` → `ml/detector.pkl`), restart-suppression test (`ml/test_restart_suppression.py`), score-over-time plot (`ml/plot_leak.py`) and firing-log export for Sadhil (`ml/export_firing_log.py`) all exist and run against real data in `data/healthy/` and `data/chaos/`. The latest change (`df9380a`) fixed a desensitization bug in `replay()` and re-tuned on the corrected evaluation — see Part 5.2.1. Current defaults: `alpha=0.3, threshold=4.0, k=2, n=1`.
 >
-> **Your next 3 steps:** (1) look at `ml/dataset.py` and `ml/features.py`, agree the canonical metric order with Sadhil, then move windowing into your shared file per Part 4.1. (2) build the detector itself, Part 4.3 — testable against any fabricated fixture in the meantime, doesn't need Shaurya's generator to exist. (3) build the replay harness, Part 4.2.
+> **What's left, in order:**
+> 1. **Get the detector into the live loop (Phase 4).** `control/controller.py` doesn't import `ml.fit_detector` yet — it only takes a `detector_score` value. Pair with Shravan to call `detector.score(...)` each tick and `detector.on_restart(workload)` after every restart action, then verify the infinite-loop guard live.
+> 2. **Fix the post-restart dead-zone problem** flagged by `eval/harness.py`: `on_restart()` mutes a workload for ~8 min, but the chaos campaign only leaves a 120s recovery gap, so every `DISK_STRESS` run (which follows `MEMORY_LEAK`) is structurally undetectable (30/30 contaminated in `eval/results.csv`). Decide with Shaurya whether to lengthen the gap or shorten suppression — this is a measurement problem, not a detector-quality problem.
+> 3. **Update the Part 5.4 table with final numbers** from the corrected run (Shaurya's `eval/results.csv` is the cross-check) and confirm Sadhil has received `data/chaos/firing_log.csv` / `firing_events.csv` for the accuracy-vs-lead-time curve.
+> 4. **Phase 5:** automatic baselining and drift detection (refit trigger). Later: third tier, countdown regression, Phase 6 forecaster and simulated environment (Part 8).
 
 ---
 
@@ -332,11 +336,17 @@ The curve shows accuracy rising as failure approaches. It quantifies the tradeof
 - [x] Zero-variance metrics identified and dropped (`MIN_HEALTHY_VARIANCE` guard in `Detector._init_workloads`)
 - [x] Warm-up suppression working (`WARMUP_TICKS`)
 - [x] Post-restart suppression (`on_restart()`) verified (`ml/test_restart_suppression.py`): fires without it, fully suppressed with it for the full window
-- [x] Parameter sweep run (24 combos, `ml/tune.py`); configuration chosen deliberately -- see Part 5.2.1
-- [x] Per-fault recall and lead-time table -- from the sample fixture initially, now superseded by a real run against `data/healthy/` + `data/chaos/` (Part 5.2.1): CPU_HOG 0.42/260s, DISK_STRESS 0.17/262s, MEMORY_LEAK 0.42/11s, POD_KILL 0.0 (expected)
-- [x] False positives per hour -- 0.71/hr on real data (clean stretches within `data/chaos/`), plus the earlier 0-fire result on a held-out split of real healthy data alone
+- [x] Parameter sweep run (24 combos, `ml/tune.py`, plus a finer real-data sweep); configuration chosen deliberately -- see Part 5.2.1
+- [x] `replay()` desensitization bug fixed (`df9380a`): it now takes `labels` and uses `score_only()` on fault ticks, so faults no longer leak into the healthy reference
+- [x] Per-fault recall and lead-time table on real data, re-measured after the bug fix (Part 5.2.1, balanced pick): CPU_HOG 0.67/261s, DISK_STRESS 0.33/283s, MEMORY_LEAK 0.75/50s, POD_KILL 0.50/3s (aftermath, not prediction)
+- [x] False positives per hour -- 0.54/hr on real data with the corrected replay and balanced config
 - [x] The score-over-time plot for one ramping leak (`ml/plot_leak.py` -> `ml/memory_leak_example.png`)
-- [ ] Model file shipped (`ml/detector.pkl` via `ml/fit_detector.py`, frozen `score()`/`on_restart()` interface documented in `ml/README.md`) -- not yet wired into a live loop, because no such loop exists in `control/controller.py` yet (that's Shravan's piece to build)
+- [x] Model file shipped (`ml/detector.pkl` via `ml/fit_detector.py`, frozen `score()`/`on_restart()` interface documented in `ml/README.md`), re-shipped with the corrected defaults
+- [x] Firing log exported for Sadhil's accuracy-vs-lead-time curve (`ml/export_firing_log.py` -> `data/chaos/firing_log.csv`, `firing_events.csv`; gitignored, handed off directly)
+- [ ] Detector live in the controller loop, with `on_restart()` called after every restart action and the infinite-loop guard verified live (Phase 4) -- blocked on `control/controller.py` importing the detector (Shravan)
+- [ ] Resolve the post-restart dead zone vs the 120s chaos recovery gap (see "What's left" above) so `DISK_STRESS` recall is measurable
+- [ ] Phase 5: automatic baselining and drift detection (refit trigger)
+- [ ] Phase 6: load forecaster and simulated training environment
 
 
 ---
