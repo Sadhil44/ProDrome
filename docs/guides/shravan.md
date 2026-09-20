@@ -6,9 +6,29 @@ You own the machine everything runs on and the component that actually changes t
 
 > **Where this fits** (see `PRD.md` §10): Part 3 is Phase 0–1 (the cluster). Part 4 runs from Phase 1 (controller loop on stubs, in shadow) through Phase 4 (controller live, safety rails verified). Part 5.3 is Phase 6.
 >
-> **Repo status right now:** the `prodrome` kind cluster exists and is running (3 nodes Ready, context `kind-prodrome`) — Part 3.1 is done. Nothing past that yet: no stress-tool images, no `infra/workloads.yaml`, no controller code in `control/`. Two things you'll wire in already exist, ready to import: `ml/classifier.py` (stub, returns `("MEMORY_LEAK", 0.9)`) and `control/policy.py` (`decide(predicted_class, confidence) -> action`). Sagar's detector stub isn't written yet, so per Part 4.4 you'll need your own throwaway `fired = memory > 80%` detector until his real one exists.
->
-> **Your next 3 steps:** (1) build the stress-tool images and load them into the cluster, Part 3.3. (2) deploy the workloads with resource limits and probes, Part 3.4, then prove a failure actually happens by hand, Part 3.5 — nothing else substitutes for watching an OOMKill happen once. (3) start the controller loop against the stubs above, in shadow mode.
+## Progress update for teammates
+
+The workload manifests and controller foundation are committed. The earlier setup update recorded a three-node `prodrome` kind cluster with context `kind-prodrome`; current cluster health has not been rechecked for this documentation update.
+
+### Completed by Shravan
+
+- **Stress-tool Dockerfiles:** added Redis 7, nginx 1.27, and PostgreSQL 16 images with `stress-ng` and `procps` for fault injection and debugging ([infra/images/](../../infra/images/)).
+- **Workload manifests:** added Deployments and Services for Redis, nginx, and PostgreSQL, including resource requests/limits, readiness/liveness probes, and `IfNotPresent` image pull policy ([infra/workloads.yaml](../../infra/workloads.yaml)).
+- **Control-arm manifests:** added the corresponding workloads in the separate `control` namespace for comparison with stock Kubernetes ([infra/workloads-control.yaml](../../infra/workloads-control.yaml)).
+- **Controller API helpers:** implemented kubeconfig-based connection setup, replica-count reads, scaling via the Deployment scale API, and rolling restarts through a pod-template timestamp annotation ([control/controller.py](../../control/controller.py)).
+- **Decision logging:** implemented append-only CSV logging to `control/decisions.csv`, with `timestamp`, `workload`, `detector_score`, `fired`, `predicted_class`, `confidence`, `action`, and `result` columns.
+- **Safety foundations:** added default dry-run behavior in `execute_action`, a five-replica ceiling in `scale`, per-workload 120-second cooldown tracking, and a `STOP` file check. Cooldown and kill-switch checks still need enforcement in the controller loop.
+
+### Integration handoff and remaining work
+
+The controller is currently a collection of helpers. Running it directly only reports whether the `STOP` file exists; it does not yet collect metrics or evaluate models repeatedly.
+
+- **Shaurya:** workload and control-arm manifests are available for collection and chaos runs. The decision-log writer is ready, but the controller loop must call it before there is a continuous stream of real decisions for evaluation or the dashboard.
+- **Sagar:** wire the real detector into the loop and call its post-restart suppression hook after a successful restart.
+- **Sadhil:** wire the classifier and `decide(predicted_class, confidence)` policy into the loop. Policy actions currently include `rolling_restart`, `scale_out`, `alert_only`, and `nothing`, while the live executor only recognizes `restart`; these need to be mapped and implemented consistently.
+- **Shravan:** build the recurring metrics → detector → classifier → policy → action → log loop, enforce cooldown and the kill switch before actions, and verify it in shadow mode before live remediation.
+
+**Validation still to record:** image builds/loading, workload readiness in both namespaces, a manually observed OOMKill, individual controller action checks, safety-rail checks, and a live head-to-head fault experiment. The committed code establishes the implementation above, but does not by itself verify these runtime outcomes. The walkthrough below describes the full build process, including steps that remain unfinished.
 
 ---
 
