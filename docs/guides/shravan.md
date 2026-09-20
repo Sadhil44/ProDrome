@@ -47,6 +47,7 @@ Completed in the repository:
 - [x] Add the `STOP`-file kill switch check.
 - [x] Add one-tick detector → classifier → policy → action → log evaluation.
 - [x] Add a continuous polling loop that evaluates configured workloads.
+- [x] Make `Detector.score()` accept both the frozen ordered 8-value interface and named metric mappings; the controller can pass collector output directly without scoring dictionary keys.
 - [x] Map policy actions for rolling restart, scale out, alert-only, and no-op decisions.
 - [x] Reset the detector after an executed restart when it provides `on_restart`.
 - [x] Run Python syntax validation for the controller and policy modules.

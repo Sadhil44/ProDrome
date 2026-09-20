@@ -16,6 +16,7 @@ END of the healthy timeline, not the start.
 """
 
 import pickle
+from collections.abc import Mapping
 from collections import deque
 
 import numpy as np
@@ -227,11 +228,18 @@ class Detector:
         return det
 
     def score(self, workload: str, values) -> tuple[float, bool]:
-        """values: array of 8 readings in ml.features.METRICS order.
+        """Score one tick from an ordered array or a metrics mapping.
+
+        Ordered sequences contain 8 readings in ``ml.features.METRICS`` order.
+        Mappings are normalized to that same order, which lets live collectors
+        pass named metrics without accidentally scoring the dictionary keys.
         Returns (score, fired) -- score is the max z-score among this
         workload's active metrics this tick (0.0 while any are warming up)."""
         wd = self.workloads[workload]
-        values_by_metric = dict(zip(METRICS, values))
+        if isinstance(values, Mapping):
+            values_by_metric = {metric: values.get(metric) for metric in METRICS}
+        else:
+            values_by_metric = dict(zip(METRICS, values))
         z_scores, fired = wd.update(values_by_metric)
 
         finite = [z for z in z_scores.values() if z is not None]
