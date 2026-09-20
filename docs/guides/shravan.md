@@ -30,6 +30,38 @@ The controller is currently a collection of helpers. Running it directly only re
 
 **Validation still to record:** image builds/loading, workload readiness in both namespaces, a manually observed OOMKill, individual controller action checks, safety-rail checks, and a live head-to-head fault experiment. The committed code establishes the implementation above, but does not by itself verify these runtime outcomes. The walkthrough below describes the full build process, including steps that remain unfinished.
 
+### Shravan's implementation checklist
+
+Completed in the repository:
+
+- [x] Add Redis, nginx, and PostgreSQL stress-tool Dockerfiles with `stress-ng` and `procps`.
+- [x] Define managed `prodrome` workloads with resource requests/limits and readiness/liveness probes.
+- [x] Define identical `control` workloads for the stock-Kubernetes comparison arm.
+- [x] Add kubeconfig-based Kubernetes API connection setup.
+- [x] Add Deployment replica reads and scale-subresource updates.
+- [x] Add rolling restart through a pod-template timestamp annotation.
+- [x] Add CSV decision logging with detector, classifier, action, and result fields.
+- [x] Enable dry-run execution by default.
+- [x] Add a five-replica safety ceiling.
+- [x] Add per-workload cooldown tracking.
+- [x] Add the `STOP`-file kill switch check.
+- [x] Add one-tick detector → classifier → policy → action → log evaluation.
+- [x] Add a continuous polling loop that evaluates configured workloads.
+- [x] Map policy actions for rolling restart, scale out, alert-only, and no-op decisions.
+- [x] Reset the detector after an executed restart when it provides `on_restart`.
+- [x] Run Python syntax validation for the controller and policy modules.
+
+Still to complete or verify:
+
+- [ ] Connect `metrics_source` to live Prometheus queries.
+- [ ] Run the loop against the real detector and classifier implementations.
+- [ ] Build and load all stress-tool images into the kind cluster.
+- [ ] Apply both workload manifests and confirm every pod becomes Ready.
+- [ ] Manually trigger and record an OOMKill in the managed namespace.
+- [ ] Verify scale, restart, cooldown, kill-switch, and replica-ceiling behavior against Kubernetes.
+- [ ] Run one complete fault cycle in dry-run mode and inspect `control/decisions.csv`.
+- [ ] Run the live head-to-head experiment against the control namespace.
+
 ---
 
 ## Part 1 — Understanding what you're building
