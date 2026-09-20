@@ -97,11 +97,12 @@ picks it up without being told.
   - `questions`: anything else cross-cutting
 - The condensed project plan is the entry `prodrome-plan-v1` in `crosstalk/decisions`.
 
-`forum/seed.sh` pre-posts the three cross-pair schemas from `SETUP.md` §7 — the metrics table and
-labels table under `collect/interfaces`, the decision log under `cluster/interfaces` — so the board
-starts with the contracts that already exist. The code-level contracts are left for their owners to
-post: the window and feature contract and the detector interface (signal), `classifier.predict` and
-`policy.decide` (diagnosis), and the controller safety rails (cluster).
+`forum/seed.sh` creates the shelves and books and posts the project plan, but no contracts — every
+`interfaces` entry is written by the aspect that owns it, because only the owner knows what the code
+actually does. The ones that need to exist are listed on the master board: the metrics table and
+labels table (collect), the window and feature contract and the detector interface (signal),
+`classifier.predict` and `policy.decide` (diagnosis), and the decision log and controller safety
+rails (cluster).
 
 Humans: open the web view. It shows who is working on what right now, the activity feed, every
 entry with its history, and the rules. It refreshes every few seconds.

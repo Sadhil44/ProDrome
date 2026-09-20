@@ -36,51 +36,6 @@ if [ -f "$HERE/master/prodrome-plan-v1.md" ] && ! "$C" search-entries "$S" prodr
   echo "posted crosstalk/decisions/prodrome-plan-v1"
 fi
 
-# The three cross-pair schemas (SETUP.md section 7) are already agreed in the repo, so seed them
-# into their owning aspect's `interfaces` book rather than leaving the board empty on day one.
-# The owner appends to these; nobody forks them into a new entry. The code-level contracts
-# (window/features, detector, classifier+policy, controller safety rails) are NOT seeded on
-# purpose: their owners post them, because only the owner knows what the code actually does.
-contract() { # contract <shelf> <name> <description> <labels> <body>
-  if "$C" search-entries "$S" "$2" 2>/dev/null | grep -q "\"name\": \"$2\""; then return 0; fi
-  "$C" add-entry "$S" --shelf "$1" --book interfaces "$2" "$3" --labels "$4" "$5" >/dev/null
-  echo "posted $1/interfaces/$2"
-}
-contract collect metrics-table-schema \
-  "Metrics table (Parquet): columns, units, tick rate, workload naming, where it lands under data/" \
-  "collect,signal,diagnosis,crosstalk,contract" \
-  "SETUP.md section 7. Parquet, one row per workload per 15-second tick:
-  ts, workload, cpu_cores, mem_bytes, mem_pct, net_rx, net_tx, fs_reads, fs_writes, restarts
-\`workload\` is a stable name (\`redis\`, not \`redis-7d9f8b-x2k1\`) so it joins across runs.
-Paths (SETUP.md section 8): data/healthy/metrics.parquet is the baseline collection, read by signal;
-data/chaos/metrics.parquet is the fault runs, read by diagnosis; data/samples/ is the small committed
-fixture everyone falls back to when a real run is not ready.
-Owner: collect. Consumers append questions here. Changing a column means appending here AND posting
-to crosstalk/announcements labeled signal and diagnosis."
-contract collect labels-table-schema \
-  "Labels table (CSV): one row per injected fault, and why run_id is required" \
-  "collect,signal,diagnosis,crosstalk,contract" \
-  "SETUP.md section 7. CSV, one row per injected fault:
-  start_ts, end_ts, workload, fault_type, pattern, run_id
-\`run_id\` is required: train/test splits are by run, never by row, because consecutive windows
-overlap by 19 of 20 ticks and a random split puts near-duplicates on both sides (SETUP.md section 10,
-rule 2). \`pattern\` distinguishes constant from ramp; both must exist, or the model never sees what a
-slide toward failure looks like. Label the FULL fault trajectory including the faint early windows,
-not just the peak (rule 3) - otherwise the classifier only recognises faults that are already
-catastrophic, and fails exactly where the detector fires.
-Lands next to the metrics table: data/chaos/labels.csv. Owner: collect."
-contract cluster decision-log-schema \
-  "Decision log (CSV): one row per controller evaluation, plus what mode means" \
-  "cluster,collect,signal,diagnosis,crosstalk,contract" \
-  "SETUP.md section 7. CSV, one row per controller evaluation:
-  ts, workload, detector_score, fired, predicted_class, confidence, top_features, action, result, mode
-\`mode\` is shadow or live: in shadow the controller decides and logs but does not touch the cluster.
-Written by cluster, read by collect for the evaluation harness and by the dashboard.
-Owner: cluster. Append here when a column is added, and announce it - the dashboard and the eval
-harness both read this file positionally by name.
-Still to be posted by their owners: the window/feature contract (signal), the detector interface
-(signal), classifier.predict + policy.decide (diagnosis), and the controller safety rails (cluster)."
-
 if ! "$C" search-entries "$S" forum-opened 2>/dev/null | grep -q '"name": "forum-opened"'; then
   "$C" add-entry "$S" --shelf crosstalk --book announcements forum-opened \
     "The forum is open: aspects, books, and the rules every agent must follow" \

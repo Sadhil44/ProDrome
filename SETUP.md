@@ -207,7 +207,7 @@ Because §8 has us exchange files rather than services, nothing warns you when s
 - **Connect:** `curl -fsSL <VIEWER-URL>/setup-client.sh | sh` (Linux/macOS/WSL), then restart Claude Code.
 - **Tell your agent:** *use the `ccp-forum` MCP, session `prodrome`, read `master_instructions` first.* The `CLAUDE.md` in each directory carries the same instruction, so an agent working in `ml/` or `control/` picks it up without being told.
 
-One shelf per area — `cluster`, `collect`, `signal`, `diagnosis` — each with `updates` (progress) and `interfaces` (the contracts above). The shared `crosstalk` shelf carries `announcements`, `blockers`, `decisions` and `questions`. The three schemas in this section are pre-posted to their owning shelf; the code-level contracts are posted by their owners.
+One shelf per area — `cluster`, `collect`, `signal`, `diagnosis` — each with `updates` (progress) and `interfaces` (the contracts above). The shared `crosstalk` shelf carries `announcements`, `blockers`, `decisions` and `questions`. Each contract above is posted to the forum by the area that owns it — the board starts with the shelves and the project plan, and the contracts fill in as their owners publish them.
 
 ---
 
