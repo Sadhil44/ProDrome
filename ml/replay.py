@@ -6,7 +6,9 @@ Two ways to run a detector against stored data:
   when that file doesn't overlap in time with whatever the detector was
   fit on (e.g. fit on data/healthy/*, replay data/chaos/*) -- otherwise
   you re-walk ticks the detector already trained on, restarting from a
-  point in time the detector's internal state has moved past.
+  point in time the detector's internal state has moved past. Requires
+  `labels` for any file with more than one fault: see the fixed-bug note
+  on replay() itself for why.
 
 - train_and_replay(): for a SINGLE file with healthy and fault ticks
   interleaved in time (like the sample fixture) -- one continuous pass
@@ -19,23 +21,41 @@ Two ways to run a detector against stored data:
 import pandas as pd
 
 from ml.detector import ALPHA, K_OF_N_METRICS, N_CONSECUTIVE, Z_THRESHOLD, Detector
-from ml.features import METRICS
 
 
-def replay(detector, metrics: pd.DataFrame) -> pd.DataFrame:
+def replay(detector, metrics: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
     """Score every tick in `metrics` against `detector`, one workload at a
     time, oldest first. `detector` must already be fit -- this only scores,
-    it never trains. See the module docstring for when this is (and isn't)
-    the right tool.
+    never trains on a labeled fault tick.
+
+    Bug fixed here, credit to eval/harness.py's replay_no_leakage() for
+    catching it: this used to call Detector.score() -> WorkloadDetector.
+    update() on every tick regardless of fault status. Fine over one
+    isolated fault, wrong over any file with several faults back-to-back
+    (a real chaos campaign, not just the tiny bundled sample) -- each
+    fault's abnormal values got folded into the "healthy" reference, so
+    the detector progressively desensitized to everything after it
+    (verified by tracing a DISK_STRESS window: fires correctly in
+    isolation, z~4; scored deep into a multi-fault file via the old path,
+    doesn't fire at all). Branches exactly like train_and_replay() now:
+    score_only() inside a labeled window, update() outside it.
 
     Returns one row per tick: ts, workload, score, fired.
     """
+    is_fault = fault_mask(metrics, labels)
+
     records = []
     for workload, group in metrics.groupby("workload"):
         group = group.sort_values("ts")
-        for _, row in group.iterrows():
-            values = [row[m] for m in METRICS]
-            score, fired = detector.score(workload, values)
+        wd = detector.workloads[workload]
+        fault_flags = is_fault.loc[group.index]
+
+        for (_, row), is_f in zip(group.iterrows(), fault_flags):
+            values = {m: row[m] for m in wd.metrics}
+            z_scores, fired = wd.score_only(values) if is_f else wd.update(values)
+
+            finite = [z for z in z_scores.values() if z is not None]
+            score = max(finite) if finite else 0.0
             records.append((row["ts"], workload, score, fired))
 
     return pd.DataFrame(records, columns=["ts", "workload", "score", "fired"])

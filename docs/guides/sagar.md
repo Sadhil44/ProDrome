@@ -227,18 +227,32 @@ Lower thresholds → more firings → higher recall, lower precision. Higher →
 
 **There is no configuration that's best at both.** Pick deliberately and report both the balanced choice and the precision-optimal one. The published paper found exactly the same tradeoff; naming it is a sign you understand the problem, not a weakness.
 
-### 5.2.1 Chosen configuration (against the sample fixture)
+### 5.2.1 Chosen configuration
 
-Run against the bundled `data/samples/metrics.parquet` + `labels.csv` (24-combo sweep, `ml/tune.py`):
+**Revised three times -- the third revision was a bug fix, not a retune, and it's the important one.**
 
-| | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK |
-|---|---|---|---|---|---|---|---|---|
-| **Balanced (chosen default)** | 0.1 | 2.5 | 3 | 1 | 0.00 | 0.83 recall, 255s lead | 0.83 recall, 285s lead | 0.50 recall, 210s lead |
-| **Precision-leaning alternate** | 0.1 | 4.0 | 3 | 2 | 0.00 | 0.67 recall, 240s lead | 0.67 recall, 270s lead | 0.50 recall, 180s lead |
+**Pass 1 (synthetic only):** a 24-combo sweep against the bundled `data/samples/metrics.parquet` fixture picked `alpha=0.1, threshold=2.5, k=3, n=1` (0.00 fp/hr, 0.83/0.83/0.50 recall). Never validated against anything real.
 
-**Caveat:** several configs in the grid hit `fp_per_hour = 0.00` on this sample -- it's a handful of clean hours in one small file, so zero measured false positives likely means "not enough clean data to trigger one" rather than a validated precision ceiling. The balanced pick above is the best-recall config among the zero-FP ones, not the winner of a real precision/recall tradeoff. Revisit both numbers once Shaurya's real healthy/chaos data replaces this fixture -- the tradeoff Part 5.2 describes should actually show up then.
+**Pass 2 (real data, still buggy):** once `data/healthy/` + `data/chaos/` landed, re-running the sweep for real showed `k=3` collapsing to 0.0 recall on `DISK_STRESS`/`MEMORY_LEAK`, "fixed" by dropping to `k=2`, then further tuned to `threshold=2.0` (1.79 fp/hr, 0.50/0.33/0.58 recall, 27s `MEMORY_LEAK` lead). This looked like a real, if disappointing, finding: real faults don't correlate across metrics as cleanly as the generator stylizes them.
 
-The balanced config is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
+**Pass 3 (the bug):** it wasn't (mostly) a real finding. `ml.replay.replay()` had a real bug -- it called `Detector.score()` -> `WorkloadDetector.update()` on *every* tick regardless of fault status. Fine over one isolated fault, wrong over a chaos file with several faults back-to-back: each fault's abnormal values got folded into the "healthy" reference, so the detector progressively desensitized the further it walked through the file. Credit to `eval/harness.py` for catching this empirically (an isolated fault fires correctly; the same fault scored deep into a multi-fault file doesn't fire at all) and working around it with `replay_no_leakage()`. Fixed in `ml.replay.replay()` itself (now takes `labels` and branches `score_only()`/`update()` exactly like `train_and_replay()`), then re-swept for real:
+
+| | alpha | threshold | k | n | fp/hr | CPU_HOG | DISK_STRESS | MEMORY_LEAK | POD_KILL |
+|---|---|---|---|---|---|---|---|---|---|
+| Pass 2 pick, re-measured after the fix | 0.1 | 2.0 | 2 | 1 | 2.05 | 0.50 recall, 275s lead | 0.33 recall, 144s lead | 0.42 recall, 26s lead | 0.25 |
+| **Balanced (chosen default)** | **0.3** | **4.0** | 2 | 1 | **0.54** | 0.67 recall, 261s lead | 0.33 recall, 283s lead | 0.75 recall, **50s lead** | 0.50, 3s |
+| **Sensitivity-leaning alternate** | 0.3 | 2.0 | 2 | 1 | 2.77 | 0.92 recall, 276s lead | 0.67 recall, 226s lead | 0.58 recall, 42s lead | 0.25, 5s |
+
+`k=3` no longer collapses at all once the bug is fixed (e.g. `alpha=0.3, threshold=4.0, k=3, n=1` gets 0.18 fp/hr with 0.50/0.33/0.67 recall) -- the "real faults don't correlate" story from Pass 2 was substantially the bug talking, not genuine signal. The corrected sweep also found a materially better operating point than either prior pass: higher threshold *and* lower fp *and* better recall across every fault type, which isn't a tradeoff you'd expect from tuning alone -- it's what happens when the measurement itself was broken.
+
+**What real data revealed, not just retuned (this part held up across the bug fix):**
+- **A genuine precision/recall tradeoff exists** (0.54 to 2.77 fp/hr across the rows above) -- the synthetic fixture was too small to ever show this.
+- **Real `MEMORY_LEAK` lead time tops out around 42-50s, not the ~165-225s the synthetic fixture implied** -- a real leak develops far faster than the generator modeled. This is the number that matters for "can the controller act in time," and it's a much thinner margin than the synthetic result suggested.
+- **`POD_KILL` recall is nonzero (0.25-0.50) at very short lead (3-5s)** -- this is almost certainly catching the aftermath within one tick as the pod dies, not real advance warning. Don't read it as "the detector predicted a pod kill"; Part 5.4's "~0s, expected" framing is still the honest one.
+
+**Lesson worth keeping, not just the number:** ground rule #8 ("if it isn't reproducible, it isn't a result") applies to the evaluation code too, not just the detector. A surprising real-data finding (recall collapsing) was actually a bug in how the finding was measured -- worth the reflex of asking "is my harness correct" before concluding "the real world is different," especially when the surprise is a clean collapse to exactly 0 rather than a gradual degradation.
+
+The balanced pick is now `ml/detector.py`'s module defaults (`ALPHA`, `Z_THRESHOLD`, `K_OF_N_METRICS`, `N_CONSECUTIVE`).
 
 ### 5.3 Calibrate expectations before you start
 
@@ -317,12 +331,12 @@ The curve shows accuracy rising as failure approaches. It quantifies the tradeof
 - [x] Detector fit only on healthy data (`Detector.fit_healthy` / `train_and_replay`'s healthy-only `update()` calls)
 - [x] Zero-variance metrics identified and dropped (`MIN_HEALTHY_VARIANCE` guard in `Detector._init_workloads`)
 - [x] Warm-up suppression working (`WARMUP_TICKS`)
-- [ ] Post-restart suppression (`on_restart()`) implemented but not yet tested against a real restart scenario
-- [ ] Parameter sweep run (24 combos, `ml/tune.py`) -- configuration not yet chosen deliberately
-- [x] Per-fault recall and lead-time table (from the sweep, against the bundled sample fixture)
-- [x] False positives per hour -- computed from the sample fixture's healthy ticks, not yet from Shaurya's dedicated clean runs (don't exist yet)
-- [ ] The score-over-time plot for one ramping leak
-- [ ] Model file running in Shravan's live loop
+- [x] Post-restart suppression (`on_restart()`) verified (`ml/test_restart_suppression.py`): fires without it, fully suppressed with it for the full window
+- [x] Parameter sweep run (24 combos, `ml/tune.py`); configuration chosen deliberately -- see Part 5.2.1
+- [x] Per-fault recall and lead-time table -- from the sample fixture initially, now superseded by a real run against `data/healthy/` + `data/chaos/` (Part 5.2.1): CPU_HOG 0.42/260s, DISK_STRESS 0.17/262s, MEMORY_LEAK 0.42/11s, POD_KILL 0.0 (expected)
+- [x] False positives per hour -- 0.71/hr on real data (clean stretches within `data/chaos/`), plus the earlier 0-fire result on a held-out split of real healthy data alone
+- [x] The score-over-time plot for one ramping leak (`ml/plot_leak.py` -> `ml/memory_leak_example.png`)
+- [ ] Model file shipped (`ml/detector.pkl` via `ml/fit_detector.py`, frozen `score()`/`on_restart()` interface documented in `ml/README.md`) -- not yet wired into a live loop, because no such loop exists in `control/controller.py` yet (that's Shravan's piece to build)
 
 
 ---

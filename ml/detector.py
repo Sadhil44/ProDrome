@@ -23,22 +23,31 @@ import pandas as pd
 
 from ml.features import METRICS
 
-# Chosen via the Part 5.1 sweep against the sample fixture: best recall
-# among the configs at fp_per_hour=0.00 (see docs/guides/sagar.md Part
-# 5.2 for the balanced-vs-precision writeup). Caveat: the sample is tiny
-# enough that several configs hit zero measured false positives, so this
-# isn't yet a validated precision/recall tradeoff -- revisit once
-# Shaurya's real healthy/chaos data lands.
-ALPHA = 0.1                    # EWMA prediction responsiveness
+# Chosen via the Part 5.1 sweep against REAL data/healthy + data/chaos,
+# corrected (see docs/guides/sagar.md Part 5.2.1). The two earlier real
+# picks here (k=3->k=2, then threshold 2.5->2.0) were computed with a
+# real bug in ml.replay.replay(): it trained on every tick regardless of
+# fault status, so the detector progressively desensitized across the
+# chaos file's many faults -- credit to eval/harness.py for catching
+# this. Once fixed, k=3 no longer collapses on real data at all (it was
+# largely the bug, not real cross-metric decorrelation), and the actual
+# best real-data balance is a much higher threshold with k=2.
+ALPHA = 0.3                    # EWMA prediction responsiveness
 ERROR_HISTORY = 100            # ticks of error history kept per metric
 WARMUP_TICKS = 30              # ticks before a metric starts scoring
 RECENT_WINDOW = 5              # "recent" errors compared against the full history
-Z_THRESHOLD = 2.5              # std devs of error above typical -> anomalous
+Z_THRESHOLD = 4.0              # std devs of error above typical -> anomalous
 STD_FLOOR = 1e-6               # avoids divide-by-zero on constant metrics
 
-K_OF_N_METRICS = 3             # how many metrics must be anomalous at once
+K_OF_N_METRICS = 2             # how many metrics must be anomalous at once
 N_CONSECUTIVE = 1              # how many consecutive ticks that must hold
-MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (e.g. restarts) are dropped
+MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (perfectly constant) are dropped
+# A metric can be "almost always constant, rare tiny blip" (restarts; net_tx on a
+# loopback-only workload) without ever tripping the variance check above -- and a
+# fixed variance cutoff can't generalize across metrics measured in different units
+# anyway. Drop a metric if it sits at its single most common value more than this
+# fraction of the time, regardless of that value's raw variance.
+MAX_MODE_FRACTION = 0.98
 POST_RESTART_SUPPRESS_TICKS = 32  # ~8 minutes at 15s ticks (Part 4.4)
 
 # A fault that only ever disturbs one metric (e.g. a pure CPU hog) can
@@ -176,9 +185,15 @@ class Detector:
         callers decide how ticks get fed in."""
         det = cls()
         for workload, group in healthy.groupby("workload"):
-            active_metrics = [
-                m for m in METRICS if group[m].astype(float).var() > MIN_HEALTHY_VARIANCE
-            ]
+            active_metrics = []
+            for m in METRICS:
+                values = group[m].astype(float)
+                if values.var() <= MIN_HEALTHY_VARIANCE:
+                    continue
+                mode_fraction = (values == values.mode().iloc[0]).mean()
+                if mode_fraction > MAX_MODE_FRACTION:
+                    continue
+                active_metrics.append(m)
             det.workloads[workload] = WorkloadDetector(
                 active_metrics, k=k, n=n, alpha=alpha, threshold=threshold
             )
