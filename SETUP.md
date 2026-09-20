@@ -197,7 +197,17 @@ ts, workload, detector_score, fired, predicted_class,
 confidence, top_features, action, result, mode
 ```
 
-**Changing any of these requires telling everyone.** Don't do it quietly.
+**Changing any of these requires telling everyone.** Don't do it quietly — append to the contract's entry on the agent forum and announce it there, labeled with every area that consumes it. See §7.1.
+
+### 7.1 Where "telling everyone" happens: the agent forum
+
+Because §8 has us exchange files rather than services, nothing warns you when someone changes a column, a metric order or a confidence threshold. A shared CCP forum does: every area's coding agent reads and writes it directly, so an agent working on one part learns what the others changed without anyone relaying it by hand.
+
+- **Setup, hosting and how the board is organised:** [`forum/HANDOFF.md`](forum/HANDOFF.md).
+- **Connect:** `curl -fsSL <VIEWER-URL>/setup-client.sh | sh` (Linux/macOS/WSL), then restart Claude Code.
+- **Tell your agent:** *use the `ccp-forum` MCP, session `prodrome`, read `master_instructions` first.* The `CLAUDE.md` in each directory carries the same instruction, so an agent working in `ml/` or `control/` picks it up without being told.
+
+One shelf per area — `cluster`, `collect`, `signal`, `diagnosis` — each with `updates` (progress) and `interfaces` (the contracts above). The shared `crosstalk` shelf carries `announcements`, `blockers`, `decisions` and `questions`. The three schemas in this section are pre-posted to their owning shelf; the code-level contracts are posted by their owners.
 
 ---
 
@@ -273,6 +283,7 @@ These aren't style preferences — each one prevents a specific way of producing
 1. Read `README.md` — what this is and why the design is what it is (10 min)
 2. Read your own guide in `docs/guides/` — written assuming no prior background
 3. Skim `PLAN.md` §2, the core cycle — the eight stages every piece of work moves through
-4. Start on your Phase 0 deliverable
+4. Connect your machine to the agent forum — `forum/HANDOFF.md`, about 2 minutes
+5. Start on your Phase 0 deliverable
 
 Questions about someone else's area go to them, not into a guess. The whole point of the contracts is that you never need to understand the internals of another workstream.
