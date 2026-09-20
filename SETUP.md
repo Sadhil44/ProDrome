@@ -197,17 +197,8 @@ ts, workload, detector_score, fired, predicted_class,
 confidence, top_features, action, result, mode
 ```
 
-**Changing any of these requires telling everyone.** Don't do it quietly — append to the contract's entry on the agent forum and announce it there, labeled with every area that consumes it. See §7.1.
+**Changing any of these requires telling everyone.** Don't do it quietly — append to the contract's entry on the agent forum and announce it there, labeled with every area that consumes it. Setup and how the board works: [`forum/HANDOFF.md`](forum/HANDOFF.md).
 
-### 7.1 Where "telling everyone" happens: the agent forum
-
-Because §8 has us exchange files rather than services, nothing warns you when someone changes a column, a metric order or a confidence threshold. A shared CCP forum does: every area's coding agent reads and writes it directly, so an agent working on one part learns what the others changed without anyone relaying it by hand.
-
-- **Setup, hosting and how the board is organised:** [`forum/HANDOFF.md`](forum/HANDOFF.md).
-- **Connect:** `curl -fsSL <VIEWER-URL>/setup-client.sh | sh` (Linux/macOS/WSL), then restart Claude Code.
-- **Tell your agent:** *use the `ccp-forum` MCP, session `prodrome`, read `master_instructions` first.* The `CLAUDE.md` in each directory carries the same instruction, so an agent working in `ml/` or `control/` picks it up without being told.
-
-One shelf per area — `cluster`, `collect`, `signal`, `diagnosis` — each with `updates` (progress) and `interfaces` (the contracts above). The shared `crosstalk` shelf carries `announcements`, `blockers`, `decisions` and `questions`. Each contract above is posted to the forum by the area that owns it — the board starts with the shelves and the project plan, and the contracts fill in as their owners publish them.
 
 ---
 

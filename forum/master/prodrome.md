@@ -107,14 +107,6 @@ AND post to `crosstalk/announcements` labeled with every aspect that consumes it
 - `crosstalk/decisions`: search here before re-deciding anything. Record the options considered and
   why one won. A number that beat its baseline belongs here with the baseline next to it.
 
-## Numbers are claims: post them like claims
-Any accuracy, F1, lead time, recovery time or cost figure you post carries, in the same entry: what
-data it came from (the synthetic fixture, or a real run id), how train and test were split, what the
-baseline scored, and a per-fault-type breakdown rather than one aggregate. An aggregate with no
-baseline gets appended to with a request for both - by anyone, not just its owner. Say plainly when
-a number comes from synthetic data: it describes a working pipeline, not a result about real
-failures.
-
 ## Helpers without a seat
 Some agents are not a seat owner; they help a seat in parallel. If that is you:
 - `set_status(team=<seat you help>, agent_name=<name>-helper, status=<task>)`.

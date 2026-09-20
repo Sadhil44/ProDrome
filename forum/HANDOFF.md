@@ -6,48 +6,23 @@ there, so an agent working on one part learns what the others changed without an
 relaying it by hand. It runs on CCP (Cephalopod Coordination Protocol), the same tool
 some of us already use with ccp.spl.team, but on our own server.
 
-This matters more here than on a normal project, because `SETUP.md` §8 deliberately has the
-workstreams exchange **files, not services**. That keeps everyone unblocked, but it also means
-nothing tells you when someone changed a column, a metric order or a confidence threshold. The
-forum is what tells you.
+## Current URLs (they rotate, see below)
 
-## Current URLs
-
-The server runs on one teammate's laptop behind Cloudflare quick tunnels, so the URLs change
-whenever the tunnels restart. Whoever is hosting posts the current pair in the team chat; fill
-them in here when they settle down.
-
-- Forum API (what agents connect to): `<FORUM-URL>`
-- Web view (what humans open): `<VIEWER-URL>`
+- Forum API (what agents connect to): `https://address-gba-suit-victorian.trycloudflare.com`
+- Web view (what humans open): `https://determines-geography-functionality-indoor.trycloudflare.com`
 - Session name: `prodrome`
 
-## Host it (one person, 5 minutes)
-
-Windows with WSL2 and `cloudflared` on PATH:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File forum\online.ps1
-```
-
-It starts the CCP server in WSL, opens both tunnels, publishes the rules, seeds the shelves and
-starts the web view, then prints the two URLs. Re-run it after a reboot and hand out the new URLs.
-`forum\offline.ps1` stops everything; data stays in WSL under `~/.ccp-forum/data`.
-
-Any Linux box works without the tunnel scripts:
-
-```bash
-FORUM_PUBLIC_URL=http://<box-ip>:1338 VIEWER_PUBLIC_URL=http://<box-ip>:8000 forum/server/run.sh
-forum/server/publish-master.sh && forum/seed.sh && forum/viewer/run.sh
-```
+The server runs on Sadhil's laptop behind Cloudflare quick tunnels. The URLs change
+whenever the tunnels restart. When that happens Sadhil reposts the new pair in the team
+chat; re-run the connect step below with the new URL.
 
 ## Connect your machine (2 minutes)
 
-Linux, macOS, or Windows inside WSL — the same WSL2 setup `SETUP.md` §1 already asks Windows
-users for:
+Linux, macOS, or Windows inside WSL:
 
 ```sh
 export CCP_AGENT_NAME=<yourname>-<aspect>      # how your posts are attributed, e.g. sagar-signal
-curl -fsSL <VIEWER-URL>/setup-client.sh | sh
+curl -fsSL https://determines-geography-functionality-indoor.trycloudflare.com/setup-client.sh | sh
 ```
 
 This installs `ccp-client`, subscribes it to the forum, and registers an MCP server called
@@ -56,7 +31,7 @@ This installs `ccp-client`, subscribes it to the forum, and registers an MCP ser
 Already have CCP set up for ccp.spl.team? You only need:
 
 ```sh
-ccp-client subscribe prodrome --server <FORUM-URL>
+ccp-client subscribe prodrome --server https://address-gba-suit-victorian.trycloudflare.com
 ```
 
 Your existing `ccp` MCP tools then work against the forum too (same client key).
@@ -68,24 +43,11 @@ ccp-client master-instructions prodrome    # the rules
 ccp-client brief-me prodrome               # what is on the board
 ```
 
-### Do this before running the installer
-
-**Install `python3-venv` and `python3-pip` first.** A stock Ubuntu 24.04 WSL image has neither, and
-neither `pip` nor `ensurepip` is present. The installer creates the MCP server's virtualenv with
-`python3 -m venv` and then calls `pip` inside it — without these packages the venv is created empty,
-`pip` is missing, and the install fails **silently**. You end up with a working `ccp-client` CLI and
-a `ccp-forum` MCP that never loads, with nothing in the output saying why.
-
-```sh
-sudo apt update && sudo apt install -y python3-venv python3-pip
-python3 -m venv /tmp/venv-check && ls /tmp/venv-check/bin/pip && rm -rf /tmp/venv-check
-```
-
-If that `ls` prints a path, you are good. (`SETUP.md` §1 already asks for `python3.11-venv` on
-Linux; this is the same requirement, for whichever Python your WSL image ships.)
-
-Note: the Linux `ccp-client` build needs glibc 2.38 or newer (Ubuntu 24.04+). On an older
-distro use another box, or read the web view and post through a teammate.
+Note: the Linux `ccp-client` build needs glibc 2.38 or newer (Ubuntu 24.04+). On an
+older distro use another box, or read the web view and post through a teammate. Run
+`sudo apt install -y python3-venv python3-pip` before the installer: a stock Ubuntu WSL
+image has neither, and without them the MCP's virtualenv is built empty and the install
+fails silently, leaving a working `ccp-client` next to a `ccp-forum` MCP that never loads.
 
 ## Tell your agent
 
@@ -94,53 +56,39 @@ Start every agent task with something like:
 > Use the `ccp-forum` MCP, session `prodrome`. You are the **signal** agent
 > (or cluster / collect / diagnosis). Read `master_instructions` first and follow it.
 
-The master board tells the agent what to read on start, where to post progress, where to publish
-the contracts other aspects consume, and when to announce changes that affect someone else. You do
-not need to explain the forum to the agent; the rules are on the board. The `CLAUDE.md` file in
-each directory also carries the coordination line, so an agent working in `ml/` or `control/`
-picks it up without being told.
+The master board tells the agent what to read on start, where to post progress, where to
+publish the contracts other aspects consume, and when to announce changes that affect
+someone else. You do not need to explain the forum to the agent; the rules are on the board.
 
 ## How the board is organised
 
-- Shelf = aspect: `cluster`, `collect`, `signal`, `diagnosis` — one per person, matching
-  `SETUP.md` §6. Each has:
+- Shelf = aspect: `cluster`, `collect`, `signal`, `diagnosis`. Each has:
   - `updates`: progress notes, one entry per agent per day
-  - `interfaces`: contracts other aspects consume. One entry per contract, appended on change.
+  - `interfaces`: contracts other aspects consume (metrics table, labels table, window and
+    feature contract, detector interface, classifier and policy, decision log). One entry per
+    contract, appended on change.
 - Shelf `crosstalk`, shared by all:
   - `announcements`: "I changed or decided X and it affects you", labeled with the affected aspects
   - `blockers`: "I am stuck on aspect Y"; the owner appends the answer
   - `decisions`: architecture and product decisions with the reasoning
   - `questions`: anything else cross-cutting
-- The condensed project plan is the entry `prodrome-plan-v1` in `crosstalk/decisions`.
+- The full project plan is the entry `prodrome-plan-v1` in `crosstalk/decisions`.
 
-`forum/seed.sh` creates the shelves and books and posts the project plan, but no contracts — every
-`interfaces` entry is written by the aspect that owns it, because only the owner knows what the code
-actually does. The ones that need to exist are listed on the master board: the metrics table and
-labels table (collect), the window and feature contract and the detector interface (signal),
-`classifier.predict` and `policy.decide` (diagnosis), and the decision log and controller safety
-rails (cluster).
-
-Humans: open the web view. It shows who is working on what right now, the activity feed, every
-entry with its history, and the rules. It refreshes every few seconds.
+Humans: open the web view. It shows who is working on what right now, the activity feed,
+every entry with its history, and the rules. It refreshes every few seconds.
 
 ## Repo
 
-Folder `forum/`:
+Branch `ccp-forum` on `Sadhil44/ProDrome`, folder `forum/`:
 
-- `forum/master/prodrome.md`: the rules and project context agents read. Edit, then (on the host)
-  run `forum/server/publish-master.sh`.
+- `forum/master/prodrome.md`: the rules and project context agents read. Edit, then
+  (on the host) run `forum/server/publish-master.sh`.
 - `forum/aspects.txt`: the aspects. Edit, then run `forum/seed.sh` (idempotent).
 - `forum/master/prodrome-plan-v1.md`: the condensed plan posted to the board.
 - `forum/online.ps1` / `forum/offline.ps1`: bring the server and tunnels up or down (host only).
   `online.ps1` also starts `forum/watchdog.ps1`, which restarts the server/viewer if WSL drops them.
 - `forum/viewer/viewer.py`: the web view; also serves the installer and client downloads.
-- `forum/server/run.sh`, `stop.sh`, `publish-master.sh`: server lifecycle. Config lives in
-  `~/.ccp-forum/forum.env` (keys, ports, public URLs), never in the repo.
-- Admin page: `<FORUM-URL>/admin` with the `CCP_ADMIN_KEY` from `forum.env`.
+- `README.md`: fuller docs, including how to host the forum on any Linux box instead.
 
-CCP tools agents get: `master_instructions`, `brief_me`, `list_entries`, `find_entries`,
-`search_context`, `get_entry`, `add_shelf`, `add_book`, `add_entry`, `append_entry`, `get_history`,
-`set_status`, `clear_status`, `list_team_status`, `export_bundle`.
-
-Ask the host if the forum is unreachable (laptop asleep, tunnel restarted) or if you want an
+Ask Sadhil if the forum is unreachable (laptop asleep, tunnel restarted) or if you want an
 aspect added or renamed.
