@@ -48,10 +48,20 @@ from __future__ import annotations
 import argparse
 import random
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pandas as pd
+
+# This file is normally run directly (`python collect/chaos.py ...`, per every
+# usage example above and in collect/README.md), which only puts collect/ on
+# sys.path -- not the repo root, so the ml.* import below would otherwise
+# fail with ModuleNotFoundError. Insert the repo root so this keeps working
+# without changing that invocation.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ml.detector import POST_RESTART_SUPPRESS_TICKS  # noqa: E402
 
 NAMESPACE = "prodrome"
 WORKLOADS = ["redis", "nginx", "postgres"]
@@ -61,7 +71,23 @@ PATTERNS = ["constant", "ramp"]
 RAMP_STEPS = 5
 
 DEFAULT_DURATION = 300   # 5 min per run (guide 5.5)
-DEFAULT_GAP = 120        # recovery between runs
+
+# Recovery gap between runs. This is a DATA-COLLECTION knob only -- it must
+# never be closed by shortening ml.detector.POST_RESTART_SUPPRESS_TICKS
+# instead. That constant is the live infinite-loop guard (Part 4.4); touching
+# it changes real detector behavior. This gap only controls how chaos data
+# gets collected, so it's the one that has to give.
+#
+# Sized to the detector's own post-restart dead zone (its error history needs
+# this many quiet ticks to refill after on_restart(), and firing stays
+# suppressed for the same span) plus a margin. Tied to the constant rather
+# than hardcoded so the two can't silently drift apart again -- this is
+# exactly what caused every DISK_STRESS run to land inside a dead zone left
+# by the preceding MEMORY_LEAK restart when the gap was a bare 120s (see
+# eval/README.md and docs/guides/sagar.md Part 5.2.1). Override with --gap for
+# quick dry-runs; a real collection run should use this default.
+DETECTOR_TICK_SECONDS = 15  # matches the guide's 15s scrape interval throughout
+DEFAULT_GAP = POST_RESTART_SUPPRESS_TICKS * DETECTOR_TICK_SECONDS + 60  # ~9 min
 
 LABEL_COLUMNS = ["start_ts", "end_ts", "workload", "fault_type", "pattern", "run_id"]
 RUNS_COLUMNS = ["run_id", "run_type", "workload", "fault_type", "pattern",
@@ -327,7 +353,9 @@ def main() -> None:
     ap.add_argument("--one", nargs="*", metavar="ARG",
                     help="single run: FAULT WORKLOAD [PATTERN]  (PATTERN omitted for POD_KILL)")
     ap.add_argument("--duration", type=int, default=DEFAULT_DURATION)
-    ap.add_argument("--gap", type=int, default=DEFAULT_GAP)
+    ap.add_argument("--gap", type=int, default=DEFAULT_GAP,
+                    help=f"recovery seconds between runs (default {DEFAULT_GAP}s, sized to the "
+                         "detector's post-restart dead zone -- lower it for quick dry-runs only)")
     ap.add_argument("--rounds", type=int, default=1,
                     help="repeat the whole schedule N times (~2.5h each); more runs per fault type")
     ap.add_argument("--fault-types", default=None,
