@@ -6,9 +6,20 @@ You produce the data everyone else consumes, and the numbers that say whether an
 
 > **Where this fits** (see `PRD.md` §10 for the full phase plan): **Part 0 below is Phase 0 — do it first.** It's what unblocks Sagar and Sadhil before any cluster exists. Parts 1–2 are Phase 1–2 (the real scraper, real collection). Part 7 is the Phase 3 evaluation harness. The dashboard (Phase 5) and the Phase 6 cost-versus-latency curve aren't covered in this guide yet.
 >
-> **Repo status right now:** nothing in `collect/` exists yet — no synthetic generator, no scraper, no load generator, no chaos runner. `data/samples/` is empty except a placeholder README. Shravan's cluster exists (3 nodes running), but no workloads are deployed to it yet, so the real pipeline (Part 2 onward) isn't buildable either way yet. Sagar and Sadhil are both actively waiting on the Part 0 generator below to make real progress.
+> **Repo status right now (updated 2026-09-19): Parts 0–7 are all done.** Phase 0 synthetic generator, real Prometheus + scraper (Part 2–3), diurnal load generation (Part 4), the chaos runner (Part 5 — `collect/chaos.py`, supports `--campaign`, `--rounds N` to add more runs per fault type, and `--fault-types` to top up a single fault type without redoing everything else), and the Part 7 eval harness (`eval/harness.py`) are all built, tested, and committed.
 >
-> **Your next 3 steps:** (1) build the Phase 0 synthetic generator, Part 0 below — this is the one nothing else is waiting on, and the most-blocking thing you own right now. (2) once Shravan deploys workloads, install real Prometheus, Part 2.1 (helm is already installed and working in this environment). (3) build the real scraper, Part 3.2.
+> **Real datasets exist and have been handed off** (out-of-band — `data/*` is gitignored, not a `git pull`): `data/healthy/metrics.parquet` (4h10m, zero faults) → Sagar; `data/chaos/{metrics.parquet,labels.csv}` (160 fault runs — 30 CPU_HOG / 90 DISK_STRESS / 30 MEMORY_LEAK / 10 POD_KILL — plus 20 clean windows) → Sadhil.
+>
+> **Latest eval numbers** (`eval/results.csv`, run against Sagar's corrected, re-tuned detector): CPU_HOG 63.3% recall / 262s median lead, DISK_STRESS 53.3% / 188s, MEMORY_LEAK 80.0% / 34s, POD_KILL 0% (expected — the detection window is ~0s wide by construction, not a bug). Precision 0.846, fp/hour 2.4.
+>
+> **Two real bugs surfaced and fixed along the way, not just tuning:** `ml.replay.replay()` was silently retraining on fault ticks over a multi-fault file, collapsing recall the deeper it walked into a chaos campaign — caught by `eval/harness.py`'s own workaround (`replay_no_leakage()`), fixed by Sagar in `ml/replay.py` (full writeup in `docs/guides/sagar.md` Part 5.2.1). Separately, the synthetic generator had a restart-labeling leak, caught by Sagar and fixed in `data/samples/synthetic/generate.py`. The dashboard (`dashboard/terminal.py`, Part 7.4) is built and verified against fabricated `decisions.csv` rows — real vs. fabricated schema confirmed identical.
+>
+> **Open items — none block further work in this file, all need another person:**
+> - My precision/fp-per-hour (0.846 / 2.4) don't match Sagar's own sweep numbers for the same detector config (his writeup reports 0.54 fp/hr) — worth reconciling `eval/harness.py` against `ml/tune.py` rather than assuming either is correct.
+> - Shravan's decision-tree baseline still doesn't exist — blocks Sadhil's model-comparison table.
+> - The controller main loop isn't wired up — blocks the recovery-time-vs-control row (still N/A) and the dashboard's last unverified line ("against a live controller loop").
+>
+> **If you're picking this back up:** there's no next "Part" — 0 through 7 is the full scope of this guide. From here it's (1) reconciling the precision discrepancy with Sagar, (2) supporting Shravan once his loop exists — feeding it real decisions, watching the dashboard render them live, (3) another chaos/eval pass if the team wants more volume on any fault type (`--fault-types` makes this cheap).
 
 ---
 
@@ -462,16 +473,16 @@ Use `rich` (a Python terminal formatting library) for a live-updating table: wor
 
 ## Definition of done
 
-- [ ] All eight metrics verified by hand in the Prometheus UI
-- [ ] Scraper produces valid Parquet with clean workload names
-- [ ] Load generator running with genuine variation, on both namespaces
-- [ ] Canonical healthy dataset collected overnight
-- [ ] Chaos runner: 3 faults × 2 patterns, plus clean runs, plus pod kills
-- [ ] Labels file with run identifiers and seconds-to-failure
-- [ ] Full trajectories labeled, not just peaks
-- [ ] One command prints the per-fault results table
-- [ ] False positives per hour computed from the clean runs
-- [ ] Live terminal dashboard for the demo
+- [x] All eight metrics verified by hand in the Prometheus UI
+- [x] Scraper produces valid Parquet with clean workload names
+- [x] Load generator running with genuine variation, on both namespaces
+- [x] Canonical healthy dataset collected overnight
+- [x] Chaos runner: 3 faults × 2 patterns, plus clean runs, plus pod kills (plus `--rounds`/`--fault-types` to top up any one of them later)
+- [x] Labels file with run identifiers and seconds-to-failure
+- [x] Full trajectories labeled, not just peaks
+- [x] One command prints the per-fault results table (`python -m eval.harness`)
+- [x] False positives per hour computed from the clean runs
+- [x] Live terminal dashboard for the demo — built, verified against fabricated data; verifying against a *live* controller loop still needs Shravan's wiring
 
 
 ---
