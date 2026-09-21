@@ -57,9 +57,13 @@ class RandomForestClassifier:
 
 
 def _data_paths():
-    if CHAOS_METRICS.exists() and CHAOS_LABELS.exists():
-        return CHAOS_METRICS, CHAOS_LABELS
-    return SAMPLE_METRICS, SAMPLE_LABELS
+    # Deferred to ml.train so the model that ships and the metrics we report
+    # can never be fit on different datasets. Imported lazily: ml.train pulls
+    # in sklearn, and importing this module already has the side effect of
+    # loading or fitting the classifier.
+    from ml.train import default_data_paths
+
+    return default_data_paths()
 
 
 def fit_and_save() -> RandomForestClassifier:
