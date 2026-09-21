@@ -55,8 +55,16 @@ function NewTunnel([int]$port, [string]$name) {
     for ($i = 0; $i -lt 80; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $tlog) {
-            $m = [regex]::Match((Get-Content $tlog -Raw -ErrorAction SilentlyContinue), 'https://[a-z0-9-]+\.trycloudflare\.com')
-            if ($m.Success) { return $m.Value }
+            # cloudflared's log also mentions its OWN control endpoint, api.trycloudflare.com, and
+            # a naive match picks that up instead of the assigned hostname -- which silently writes
+            # a bogus URL into forum.env and republishes the boards with it. Exclude the known
+            # non-tunnel hosts rather than trusting the first match.
+            $u = [regex]::Matches((Get-Content $tlog -Raw -ErrorAction SilentlyContinue),
+                                  'https://[a-z0-9-]+\.trycloudflare\.com') |
+                 ForEach-Object { $_.Value } |
+                 Where-Object { $_ -notmatch '^https://(api|update)\.' } |
+                 Select-Object -Unique -First 1
+            if ($u) { return $u }
         }
     }
     return $null

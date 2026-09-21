@@ -19,8 +19,14 @@ function Start-Tunnel([int]$port, [string]$name) {
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $log) {
-            $m = [regex]::Match((Get-Content $log -Raw), 'https://[a-z0-9-]+\.trycloudflare\.com')
-            if ($m.Success) { return $m.Value }
+            # Skip cloudflared's own control endpoint (api.trycloudflare.com) and the updater host;
+            # matching those instead of the assigned hostname yields a URL that resolves but is not
+            # this tunnel, which is worse than failing outright.
+            $u = [regex]::Matches((Get-Content $log -Raw), 'https://[a-z0-9-]+\.trycloudflare\.com') |
+                 ForEach-Object { $_.Value } |
+                 Where-Object { $_ -notmatch '^https://(api|update)\.' } |
+                 Select-Object -Unique -First 1
+            if ($u) { return $u }
         }
     }
     throw "cloudflared did not report a URL for port $port (see $log)"
