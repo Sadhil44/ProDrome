@@ -72,8 +72,22 @@ function NewTunnel([int]$port, [string]$name) {
 
 Say "watchdog started (pid $PID), interval ${IntervalSeconds}s"
 
+# WSL itself can wedge -- the whole hvsocket layer starts refusing connections
+# (Wsl/Service/0x80072747, WSAENOBUFS) and every wsl.exe call fails instantly.
+# Retrying a restart every 30 s against that achieves nothing, floods the log,
+# and adds load to a subsystem already short of resources. Back off instead, and
+# say plainly that this needs a human, because it does: clearing it takes
+# `wsl --shutdown`, which also restarts Docker's distro and anything running in it.
+$wslFailures = 0
+$backoffUntil = [datetime]::MinValue
+
 while ($true) {
     try {
+        if ((Get-Date) -lt $backoffUntil) {
+            Start-Sleep -Seconds $IntervalSeconds
+            continue
+        }
+
         # --- layer 1: the services inside WSL -------------------------------------------------
         $ccpLocal = LocalUp $CcpPort
         $viewerLocal = LocalUp $ViewerPort
@@ -84,8 +98,24 @@ while ($true) {
             if (-not $ccpLocal) { $cmd += " && forum/server/run.sh" }
             if (-not $viewerLocal) { $cmd += " && forum/viewer/run.sh" }
             $out = wsl.exe -e bash -lc $cmd 2>&1
-            Say ($out -join "`n")
+            $text = ($out -join "`n")
+            Say $text
+
+            if ($LASTEXITCODE -ne 0 -and $text -match 'Wsl/Service|HCS_E_|could not be performed because the system lacked') {
+                $wslFailures++
+                if ($wslFailures -ge 3) {
+                    $wait = [Math]::Min(30, 5 * [Math]::Pow(2, $wslFailures - 3))
+                    $backoffUntil = (Get-Date).AddMinutes($wait)
+                    Say ("WSL itself is failing ($wslFailures consecutive). Backing off $wait min. " +
+                         "This does not self-heal: it needs `wsl --shutdown` from a human, which also " +
+                         "restarts Docker's distro and any containers in it.")
+                }
+            } else {
+                $wslFailures = 0
+            }
             Start-Sleep 3
+        } else {
+            $wslFailures = 0
         }
 
         # --- layer 2: the public tunnels ------------------------------------------------------
