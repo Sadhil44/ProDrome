@@ -54,13 +54,19 @@ function NewTunnel([int]$port, [string]$name) {
         -RedirectStandardError $tlog -WindowStyle Hidden | Out-Null
     for ($i = 0; $i -lt 80; $i++) {
         Start-Sleep -Milliseconds 500
-        if (Test-Path $tlog) {
+        # Test-Path goes true the instant Start-Process creates the redirect file, but the file
+        # is empty for a moment after that -- and Get-Content -Raw on an empty file returns $null,
+        # which makes [regex]::Matches throw "Value cannot be null". That aborted a real recovery
+        # on 2026-09-24: the watchdog survived on its outer catch, but the dead tunnel was never
+        # replaced. Read first, guard for null, and only then match.
+        $raw = $null
+        if (Test-Path $tlog) { $raw = Get-Content $tlog -Raw -ErrorAction SilentlyContinue }
+        if ($raw) {
             # cloudflared's log also mentions its OWN control endpoint, api.trycloudflare.com, and
             # a naive match picks that up instead of the assigned hostname -- which silently writes
             # a bogus URL into forum.env and republishes the boards with it. Exclude the known
             # non-tunnel hosts rather than trusting the first match.
-            $u = [regex]::Matches((Get-Content $tlog -Raw -ErrorAction SilentlyContinue),
-                                  'https://[a-z0-9-]+\.trycloudflare\.com') |
+            $u = [regex]::Matches($raw, 'https://[a-z0-9-]+\.trycloudflare\.com') |
                  ForEach-Object { $_.Value } |
                  Where-Object { $_ -notmatch '^https://(api|update)\.' } |
                  Select-Object -Unique -First 1
