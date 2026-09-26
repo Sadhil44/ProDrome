@@ -47,19 +47,33 @@ class RandomForestClassifier:
 
     def save(self, path: Path = CLASSIFIER_PATH):
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Pickle the PARTS, not self. Pickling the instance records its class by
+        # module path, and `python -m ml.classifier` runs this module as
+        # __main__ -- so the artifact came back as __main__.RandomForestClassifier
+        # and could only be loaded from that same entrypoint. Every other caller,
+        # including the controller doing `from ml.classifier import classifier`,
+        # got AttributeError. A dict has no such dependency.
+        payload = {"model": self.model, "feature_columns": self.feature_columns}
         with open(path, "wb") as f:
-            pickle.dump(self, f)
+            pickle.dump(payload, f)
 
     @classmethod
     def load(cls, path: Path = CLASSIFIER_PATH) -> "RandomForestClassifier":
         with open(path, "rb") as f:
-            return pickle.load(f)
+            payload = pickle.load(f)
+        if isinstance(payload, cls):  # artifact from before the format change
+            return payload
+        return cls(payload["model"], payload["feature_columns"])
 
 
 def _data_paths():
-    if CHAOS_METRICS.exists() and CHAOS_LABELS.exists():
-        return CHAOS_METRICS, CHAOS_LABELS
-    return SAMPLE_METRICS, SAMPLE_LABELS
+    # Deferred to ml.train so the model that ships and the metrics we report
+    # can never be fit on different datasets. Imported lazily: ml.train pulls
+    # in sklearn, and importing this module already has the side effect of
+    # loading or fitting the classifier.
+    from ml.train import default_data_paths
+
+    return default_data_paths()
 
 
 def fit_and_save() -> RandomForestClassifier:
@@ -86,7 +100,13 @@ def fit_and_save() -> RandomForestClassifier:
 
 def _load_or_fit() -> RandomForestClassifier:
     if CLASSIFIER_PATH.exists():
-        return RandomForestClassifier.load()
+        try:
+            return RandomForestClassifier.load()
+        except Exception as exc:  # noqa: BLE001 - any unreadable artifact, not one kind
+            # A pickle written by an older format, a different sklearn, or a
+            # half-written file should not brick every importer. The artifact is
+            # gitignored and cheap to rebuild, so rebuild it.
+            print(f"could not load {CLASSIFIER_PATH} ({type(exc).__name__}: {exc}); refitting")
     return fit_and_save()
 
 

@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Deliberately NOT `pip install -r requirements.txt`. That pulls torch
+      # (~2 GB, CUDA wheels by default) for ml/cnn.py, which no test imports, and
+      # the kubernetes client, which needs a cluster to be worth anything. The
+      # suite reads data/samples/ and exercises the contracts; these are what it
+      # actually needs. If a test ever needs more, add it here explicitly rather
+      # than reaching for the full file.
+      - name: Install test dependencies
+        run: pip install pandas pyarrow numpy scikit-learn pytest
+
+      - name: Run the contract suite
+        run: python -m pytest tests -q

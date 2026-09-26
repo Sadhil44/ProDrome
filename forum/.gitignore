@@ -1,0 +1,5 @@
+*.droplet
+*.log
+*.pid
+__pycache__/
+*.pyc

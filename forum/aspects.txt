@@ -1,0 +1,7 @@
+# One project aspect per line:  <shelf-name>  <description>
+# Shelf names: lowercase, no spaces. Edit freely, then re-run forum/seed.sh (idempotent).
+# The shared shelf `crosstalk` is always created and is not listed here.
+cluster    Cluster and control (Shravan): kind cluster, workload manifests and stress images, resource limits and probes, the controller loop, remediation actions (restart / scale / shed / alert), shadow-vs-live mode and the safety rails; owns control/controller.py, infra/
+collect    Observability, perturbation, evaluation (Shaurya): Prometheus install and the metric scraper, k6 load generation, the chaos runner, the evaluation harness and the control-arm comparison; owns collect/, eval/, and everything written into data/
+signal     Signal (Sagar): the unsupervised detector trained on healthy data only, the canonical shared feature and windowing code, restart suppression and k-of-n voting, the offline replay harness; owns ml/detector.py, ml/features.py, ml/replay.py
+diagnosis  Diagnosis and policy (Sadhil): the supervised fault classifier, abstention and open-set behaviour, the hand-written policy table that turns a class plus confidence into an action, the decision dashboard; owns ml/classifier.py, ml/dataset.py, ml/train.py, ml/abstention.py, ml/cnn.py, control/policy.py, dashboard/

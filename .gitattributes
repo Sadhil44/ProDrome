@@ -1,0 +1,6 @@
+# The forum tooling runs inside WSL/Linux: CRLF breaks the shebang line.
+forum/**/*.sh text eol=lf
+forum/*.sh text eol=lf
+forum/**/*.py text eol=lf
+forum/aspects.txt text eol=lf
+forum/server/forum.env.example text eol=lf

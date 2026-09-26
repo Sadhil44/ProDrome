@@ -197,7 +197,8 @@ ts, workload, detector_score, fired, predicted_class,
 confidence, top_features, action, result, mode
 ```
 
-**Changing any of these requires telling everyone.** Don't do it quietly.
+**Changing any of these requires telling everyone.** Don't do it quietly — append to the contract's entry on the agent forum and announce it there, labeled with every area that consumes it. Setup and how the board works: [`forum/HANDOFF.md`](forum/HANDOFF.md).
+
 
 ---
 
@@ -273,6 +274,7 @@ These aren't style preferences — each one prevents a specific way of producing
 1. Read `README.md` — what this is and why the design is what it is (10 min)
 2. Read your own guide in `docs/guides/` — written assuming no prior background
 3. Skim `PLAN.md` §2, the core cycle — the eight stages every piece of work moves through
-4. Start on your Phase 0 deliverable
+4. Connect your machine to the agent forum — `forum/HANDOFF.md`, about 2 minutes
+5. Start on your Phase 0 deliverable
 
 Questions about someone else's area go to them, not into a guess. The whole point of the contracts is that you never need to understand the internals of another workstream.
