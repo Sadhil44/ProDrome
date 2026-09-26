@@ -1,11 +1,11 @@
 # Put the forum on the public internet from this Windows machine (the server runs in WSL).
 # Opens two Cloudflare quick tunnels (no account needed): one for the CCP API (1338) and one
-# for the web view (8000), writes the public URLs into the forum config, restarts the server
+# for the web view (8010), writes the public URLs into the forum config, restarts the server
 # with them, republishes the rules, seeds the structure and starts the viewer.
 #   powershell -ExecutionPolicy Bypass -File forum\online.ps1
 # Quick-tunnel URLs change every time cloudflared restarts: re-run this and hand out the new URL.
 # Stop everything: forum\offline.ps1
-param([int]$CcpPort = 1338, [int]$ViewerPort = 8000)
+param([int]$CcpPort = 1338, [int]$ViewerPort = 8010)
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $wslRepo = ((wsl.exe -e wslpath -a ($repo -replace '\\', '/')) -replace "`0", "").Trim()

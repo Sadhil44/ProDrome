@@ -44,7 +44,7 @@ fi
 
 # --- URLs (placeholders until a tunnel / box IP is known) ---------------------
 [ -n "${FORUM_PUBLIC_URL:-}" ]  || setenv FORUM_PUBLIC_URL "http://127.0.0.1:${CCP_PORT:-1338}"
-[ -n "${VIEWER_PUBLIC_URL:-}" ] || setenv VIEWER_PUBLIC_URL "http://127.0.0.1:${VIEWER_PORT:-8000}"
+[ -n "${VIEWER_PUBLIC_URL:-}" ] || setenv VIEWER_PUBLIC_URL "http://127.0.0.1:${VIEWER_PORT:-8010}"
 
 # --- binaries ------------------------------------------------------------------
 case "$(uname -m)" in aarch64|arm64) arch=aarch64;; *) arch=x86_64;; esac

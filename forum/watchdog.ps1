@@ -14,7 +14,7 @@
 # Teammates still have to re-subscribe -- nothing can fix that except a stable hostname.
 #
 #   Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File forum\watchdog.ps1"
-param([int]$IntervalSeconds = 30, [int]$CcpPort = 1338, [int]$ViewerPort = 8000)
+param([int]$IntervalSeconds = 30, [int]$CcpPort = 1338, [int]$ViewerPort = 8010)
 
 $repo = Split-Path -Parent $PSScriptRoot
 $wslRepo = ((wsl.exe -e wslpath -a ($repo -replace '\\', '/')) -replace "`0", "").Trim()
