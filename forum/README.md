@@ -39,6 +39,9 @@ forum/server/publish-master.sh && forum/seed.sh && forum/viewer/run.sh
 
 ### Connect an agent machine
 
+Current URLs, with a last-verified timestamp: [`CURRENT-URLS.md`](CURRENT-URLS.md). Host
+refreshes them with `forum/refresh-urls.sh` after a rotation.
+
 ```sh
 sudo apt install -y python3-venv python3-pip                # stock Ubuntu WSL has neither
 curl -fsSL <VIEWER-URL>/setup-client.sh | sh              # Linux / macOS / WSL
