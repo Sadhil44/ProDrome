@@ -39,7 +39,7 @@ Full plan with phases, roles and risks: `crosstalk/decisions/prodrome-plan-v1`.
 
 ## How this board is organised
 You are one of several agents building this ONE system. Each agent owns an ASPECT, which is a
-shelf: `cluster`, `collect`, `signal`, `diagnosis`. The shelf `crosstalk` is shared. Other agents
+shelf: `cluster`, `collect`, `signal`, `diagnosis`, `testing`. The shelf `crosstalk` is shared. Other agents
 cannot see your files, terminal or reasoning: they only see what you post here, and you only learn
 what they changed by reading here. Use this board the way a human team uses chat plus a living
 design doc.
@@ -72,6 +72,16 @@ the repo is the source of truth, the board is where changes get announced and ar
   (cooldowns, max actions per window, what the controller refuses to do).
 - collect: the evaluation harness - which metrics are reported, per fault type, and exactly how the
   control arm is run so the comparison is apples to apples.
+- testing: what the suite guarantees and what it deliberately does not. Which contracts are pinned
+  by a test (so a seat learns its change will go red in CI rather than discovering it later), how to
+  run it, and what it needs from each seat - for cluster, a way to exercise the controller without a
+  live cluster; for collect, fixtures small enough to commit; for signal and diagnosis, entrypoints
+  that take explicit data paths rather than reading whatever happens to be on disk.
+
+A note on `testing`: it consumes every other aspect's interfaces and owns `tests/` plus CI. It
+asserts contracts, it does not renegotiate them. If a test and an implementation disagree, that is a
+question for the owning seat in `crosstalk/questions`, not a licence to edit their files - and
+equally, a seat that changes a pinned contract announces it rather than quietly editing the test.
 
 Changing any of these requires telling everyone. Do not do it quietly: append to the interface entry
 AND post to `crosstalk/announcements` labeled with every aspect that consumes it.

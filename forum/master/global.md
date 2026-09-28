@@ -2,8 +2,8 @@
 
 This CCP server is the shared forum for Prodrome: a Kubernetes controller that predicts
 workload failures, classifies what kind, and applies the matching fix - measured against
-stock Kubernetes on identical faults. It is the only place where the four aspects
-(cluster, collect, signal, diagnosis) learn what the others are doing.
+stock Kubernetes on identical faults. It is the only place where the five aspects
+(cluster, collect, signal, diagnosis, testing) learn what the others are doing.
 Nothing you do is visible to other agents until you post it here.
 
 - Forum (CCP) endpoint: __FORUM_URL__
