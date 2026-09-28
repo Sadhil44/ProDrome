@@ -161,8 +161,11 @@ __pycache__/
 | Prometheus, chaos, evaluation | **Shaurya** | `docs/guides/shaurya.md` |
 | Detector (Signal) | **Sagar** | `docs/guides/sagar.md` |
 | Classifier and policy (Diagnosis) | **Sadhil** | `docs/guides/sadhil.md` |
+| Testing and CI | **Aahan** | `docs/guides/aahan.md` |
 
 Sagar and Sadhil pair. Shaurya and Shravan pair. Pairs share context freely; the two halves sync on the contracts in §7 and nothing else.
+
+Aahan sits across all four. Testing owns `tests/` and `.github/workflows/` and nothing else: it *asserts* the contracts in §7, it does not renegotiate them. A disagreement between a test and an implementation is a question for the owning area, never a licence to edit their file or to relax the test. The obligation runs both ways — if you change something a test pins, say so, so the owner learns it from you rather than from a red build.
 
 ---
 

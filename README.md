@@ -48,6 +48,7 @@ New to the repo? Start with [SETUP.md](SETUP.md), then read your own guide in [d
 | Prometheus, chaos, evaluation | Shaurya | [docs/guides/shaurya.md](docs/guides/shaurya.md) |
 | Detector (Signal) | Sagar | [docs/guides/sagar.md](docs/guides/sagar.md) |
 | Classifier and policy (Diagnosis) | Sadhil | [docs/guides/sadhil.md](docs/guides/sadhil.md) |
+| Testing and CI | Aahan | [docs/guides/aahan.md](docs/guides/aahan.md) |
 
 Full spec: [PRD.md](PRD.md). Ground rules and conventions: [SETUP.md](SETUP.md) §10.
 
