@@ -160,26 +160,23 @@ def test_the_window_signal_produces_is_the_window_diagnosis_consumes(sample_metr
         assert not window[METRICS].isna().any().any()
 
 
-# --- where the stages do not fit (open defects, xfail so CI stays green) -----
+# --- where the stages meet ---------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="control/controller.py:execute_action() only branches on 'restart'; "
-           "policy emits scale_out/rolling_restart/alert_only. Cluster's to fix.",
-)
 def test_the_controller_can_execute_every_action_the_policy_table_emits():
-    """The mismatch this whole file exists to find.
+    """The mismatch this file exists to find — and it was real.
 
-    policy.decide() returns one of scale_out, rolling_restart, alert_only,
-    nothing. control/controller.py's execute_action() compares `action` against
-    the single literal 'restart' and returns 'unknown-action' for anything else.
-    The intersection of the two vocabularies is empty: wired up as written, every
-    decision the pipeline ever makes would be logged as unknown-action and no
-    remediation would ever be applied -- while DRY_RUN=True masks it completely,
-    because the dry-run branch returns before the comparison.
+    execute_action() used to compare `action` against the single literal
+    'restart' while policy.decide() returns scale_out, rolling_restart,
+    alert_only or nothing. The intersection was EMPTY: wired up as written,
+    every decision would have logged as unknown-action and no remediation would
+    ever have been applied — and DRY_RUN=True masked it completely, because the
+    dry-run branch returns before the comparison. It would have surfaced on the
+    day someone flipped DRY_RUN off, which is the worst possible time.
 
-    Marked strict xfail rather than deleted: when cluster adds the branches this
-    XPASSes, CI goes red, and the marker has to come off. That is the intent.
+    Cluster fixed it (origin/main: "Fixed controller wiring bug"). The strict
+    xfail is what caught that: the merge made this XPASS, CI went red, and the
+    marker came off — which is the whole point of strict over plain xfail. A
+    finding recorded this way cannot rot into a stale comment.
     """
     handled = _string_constants(CONTROLLER_SOURCE, "execute_action")
     emitted = {entry["action"] for entry in policy.POLICY.values()} - {"nothing"}
