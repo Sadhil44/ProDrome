@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ml.features import summarize
+from ml.features import WINDOW_SIZE, summarize
 
 CLASSIFIER_PATH = Path("ml/classifier.pkl")
 
@@ -39,6 +39,25 @@ class RandomForestClassifier:
         self.feature_columns = feature_columns
 
     def predict(self, window):
+        """window: WINDOW_SIZE rows by ml.features.METRICS. See the published
+        contract in signal/interfaces/window-and-feature-contract.
+
+        The length check is not pedantry. summarize() happily reduces a window of
+        any length from 2 up, so a 5-row "window" used to return a confident
+        label computed over 75 seconds of history by a model trained on 5
+        minutes -- silently, with no indication the answer meant less than it
+        appeared to. windows() never produces one, so this only ever bit a caller
+        that assembles its own window: exactly what the controller does from a
+        per-workload buffer at startup or just after a restart, which is also
+        precisely when a wrong diagnosis is most expensive.
+        """
+        if len(window) != WINDOW_SIZE:
+            raise ValueError(
+                f"predict() needs exactly WINDOW_SIZE={WINDOW_SIZE} rows, got {len(window)}. "
+                "Wait for the buffer to fill rather than scoring a short window: a short "
+                "window still returns a confident label, computed over the wrong amount of history."
+            )
+
         features = summarize(window)
         row = pd.DataFrame([features])[self.feature_columns]
         label = self.model.predict(row)[0]

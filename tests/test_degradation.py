@@ -160,28 +160,30 @@ def test_an_extra_column_is_ignored_rather_than_shifting_the_features(shipped_cl
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="RandomForestClassifier.predict() does not check len(window) == WINDOW_SIZE; "
-           "a 5-row window returns a confident label. Diagnosis's to fix.",
-)
 def test_a_window_of_the_wrong_length_is_rejected_rather_than_predicted_on(shipped_classifier):
-    """An open defect, and the one genuinely silent failure left in the chain.
+    """Was the one genuinely silent failure left in the chain. Now fixed.
 
-    predict() documents its input as WINDOW_SIZE rows and never checks. Any length
-    from 2 upward summarizes fine and comes back as a confident label computed
-    over the wrong amount of history -- a 5-row "window" is 75 seconds of data
-    scored by a model trained on 5 minutes, and nothing in the pipeline notices.
-    windows() will never produce one, so this only bites a caller that builds a
-    window itself, which is exactly what the controller does on a short buffer at
-    startup or after a restart.
+    predict() documented its input as WINDOW_SIZE rows and never checked. Any
+    length from 2 upward summarized fine and came back as a confident label
+    computed over the wrong amount of history -- a 5-row "window" is 75 seconds
+    of data scored by a model trained on 5 minutes, and nothing in the pipeline
+    noticed. windows() never produces one, so it only bit a caller that builds a
+    window itself: exactly what the controller does from a short buffer at
+    startup or after a restart, which is also when a wrong diagnosis costs most.
 
-    Strict xfail: when predict() validates its input this XPASSes, CI goes red,
-    and the marker comes off.
+    It now raises ValueError with a message that says what to do instead (wait
+    for the buffer), because the caller hitting this is mid-loop and needs to
+    know the fix, not just the fault.
     """
     for rows in (2, WINDOW_SIZE - 1, WINDOW_SIZE + 1):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="WINDOW_SIZE"):
             shipped_classifier.predict(_window(rows))
+
+    # And the right length must still work, or this would "pass" by rejecting
+    # everything.
+    label, confidence = shipped_classifier.predict(_window(WINDOW_SIZE))
+    assert isinstance(label, str)
+    assert 0.0 <= float(confidence) <= 1.0
 
 
 # --- the decision log -------------------------------------------------------

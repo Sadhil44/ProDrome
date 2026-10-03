@@ -20,6 +20,7 @@ from ml.detector import (
     MAX_MODE_FRACTION,
     RECENT_WINDOW,
     POST_RESTART_SUPPRESS_TICKS,
+    SELF_EXCLUDE_CAP,
     WARMUP_TICKS,
     Z_THRESHOLD,
     Detector,
@@ -297,32 +298,73 @@ def _warm(detector, ticks=WARMUP_TICKS + 90, seed=0):
 
 
 def test_a_metric_does_not_score_until_it_is_calibrated():
-    """WARMUP_TICKS exists so a detector cannot fire off two observations. The
-    first observation produces no error at all (nothing to compare against), so
-    the boundary sits one tick later than the constant suggests.
+    """WARMUP_TICKS exists so a detector cannot fire off two observations.
+
+    The boundary sits two ticks later than the constant suggests, for two
+    separate reasons that each cost one tick:
+      - the first observation produces no error at all (nothing to compare to);
+      - update() now scores BEFORE folding the tick into the reference, so the
+        tick being scored no longer counts toward its own calibration.
+    The second is new, and deliberate: it is the fix for update() having been
+    arithmetically unable to fire (see
+    test_update_fires_in_proportion_to_how_extreme_the_anomaly_is).
     """
     det = MetricDetector()
-    for value in range(WARMUP_TICKS):
+    for value in range(WARMUP_TICKS + 1):
         assert det.update(float(value)) == (None, False)
-    assert det.update(float(WARMUP_TICKS))[0] is not None
+    assert det.update(float(WARMUP_TICKS + 1))[0] is not None
 
 
-def test_score_only_never_extends_the_healthy_reference():
+def test_neither_path_lets_an_anomalous_tick_redefine_typical():
     """Ground rule #1 at the unit level: a fault tick must not redefine typical.
 
-    update() folds the tick into the long-term reference; score_only() must not.
-    This is the distinction eval/harness.py and ml.replay both depend on, and
-    getting it wrong was a real bug in ml.replay.replay().
+    score_only() never folds a tick in. update() folds in only ticks that scored
+    healthy, and withholds anomalous ones — that withholding is the fix for a
+    fault that runs for minutes training the detector to accept it.
+
+    So for an ANOMALOUS tick the two paths now agree, which is the point. They
+    still differ for a healthy one (below) and at the exclusion cap, which
+    test_update_resumes_learning_after_the_exclusion_cap covers.
     """
     det = _warm(MetricDetector(), ticks=WARMUP_TICKS + 5)
     before = len(det.errors)
     assert before < ERROR_HISTORY, "reference deque is full; this test could not tell growth from a drop"
 
     det.score_only(1e6)
-    assert len(det.errors) == before
+    assert len(det.errors) == before, "score_only() must never extend the reference"
+
+    _, fired = det.update(1e6)
+    assert fired, "a 1e6 excursion should score anomalous; if not, the fix regressed"
+    assert len(det.errors) == before, "update() must withhold an anomalous tick from the reference"
+
+
+def test_update_still_learns_from_a_healthy_tick():
+    """The counterpart: withholding anomalies must not stop ordinary learning, or
+    the reference freezes and the detector never adapts to anything.
+    """
+    det = _warm(MetricDetector(), ticks=WARMUP_TICKS + 5)
+    before = len(det.errors)
+
+    # A value close to the prediction scores low and must be folded in.
+    _, fired = det.update(det.prediction * 1.001)
+    assert not fired
+    assert len(det.errors) == before + 1
+
+
+def test_update_resumes_learning_after_the_exclusion_cap():
+    """Withholding anomalous ticks forever means a genuine baseline shift — a
+    deliberate scale-up, traffic that doubles for good — alarms indefinitely and
+    is never learned. SELF_EXCLUDE_CAP bounds the run of exclusions.
+    """
+    det = _warm(MetricDetector(), ticks=WARMUP_TICKS + 5)
+    before = len(det.errors)
+
+    for _ in range(SELF_EXCLUDE_CAP):
+        det.update(1e6)
+    assert len(det.errors) == before, "should still be withholding inside the cap"
 
     det.update(1e6)
-    assert len(det.errors) == before + 1
+    assert len(det.errors) == before + 1, "past the cap, the reference must start accepting again"
 
 
 def test_a_non_finite_reading_is_ignored_rather_than_poisoning_the_prediction():
@@ -399,40 +441,38 @@ def test_on_restart_clears_the_per_metric_state_it_is_documented_to_clear():
     assert len(wd.detectors["cpu_cores"].errors) == 0
 
 
-def test_update_cannot_fire_on_an_arbitrarily_extreme_anomaly():
-    """Documents signal's open desensitization defect, precisely.
+def test_update_fires_in_proportion_to_how_extreme_the_anomaly_is():
+    """Regression for the desensitization defect: update() used to be unable to
+    fire on a step change of ANY magnitude.
 
-    update() appends this tick's error to the reference distribution *before*
-    scoring against it, so the z-score is scale-invariant: a 10x excursion and a
-    10^12x excursion produce the identical z. The single-tick ceiling is
-    (1/RECENT_WINDOW) * sqrt(ERROR_HISTORY) ~= 2.0 and a sustained burst peaks
-    near 3.9, both under Z_THRESHOLD = 4.0 -- so `Detector.score()`, the only
-    public scoring API and the one the pickled artifact hands to the controller,
-    is arithmetically incapable of firing on a step change of any size.
+    The cause was ordering. update() appended this tick's error to the reference
+    distribution and then computed _z() against that same distribution, so every
+    tick was scored against a reference containing itself. That made the score
+    scale-invariant: a 10x excursion and a 10^12x excursion both produced
+    z = 1.91, with a single-tick ceiling of about
+    (1/RECENT_WINDOW)*sqrt(ERROR_HISTORY) ~ 2.0 and a sustained burst peaking
+    near 3.9 -- all under Z_THRESHOLD = 4.0. Detector.score() is the only public
+    scoring API and the one the pickled artifact hands to the controller, so the
+    live gate never opened and nothing downstream of it ever ran. That was the
+    whole of the observed "3 firings across 160 real fault runs".
 
-    That is why the live detector path fires ~3 times across 160 real fault runs
-    while the offline replay path, which uses score_only(), fires readily. This
-    test is not asserting the defect is acceptable; it pins the mechanism so a
-    fix is verifiable and so nobody re-derives it from scratch. Fixing it is
-    signal's call, not testing's.
+    update() now scores BEFORE folding the tick in. This test pins the property
+    that was missing: the score must grow with the anomaly.
     """
-    ceiling = (1.0 / RECENT_WINDOW) * (ERROR_HISTORY + 1) ** 0.5
-
     scores = {}
     for magnitude in (1e3, 1e6, 1e12):
         z, fired = _warm(MetricDetector()).update(magnitude)
         scores[magnitude] = z
-        assert not fired, f"a single {magnitude:g} excursion fired; the ceiling has moved"
-        assert z < Z_THRESHOLD
-        assert z < ceiling
+        assert fired, f"a {magnitude:g} excursion must fire"
+        assert z > Z_THRESHOLD
 
-    # Asymptotically the baseline error is negligible and z stops depending on
-    # magnitude at all: a millionfold and a trillionfold excursion score the same.
-    assert scores[1e6] == pytest.approx(scores[1e12], rel=1e-3)
+    # The specific thing that was broken: bigger anomaly, bigger score. Under the
+    # old ordering these were all equal to within 0.1%.
+    assert scores[1e12] > scores[1e6] > scores[1e3]
 
-    # Nor does sustaining it help: the burst peaks under Z_THRESHOLD and decays.
+    # And sustaining it must not decay below the threshold the way it used to.
     sustained = _warm(MetricDetector())
-    assert not any(sustained.update(1e12)[1] for _ in range(40))
+    assert sustained.update(1e12)[1], "first sustained tick must fire"
 
 
 def test_score_only_does_fire_on_the_same_extreme_anomaly():

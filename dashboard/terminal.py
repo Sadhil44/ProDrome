@@ -22,9 +22,14 @@ DECISIONS_LOG = Path("control/decisions.csv")
 REFRESH_SECONDS = 2
 MAX_ROWS = 20
 
+# SETUP.md S7, verbatim. Previously this mirrored whatever the controller
+# happened to write ("timestamp", no top_features, no mode) rather than the
+# contract, so the two halves drifted together and the divergence was invisible
+# from either side. `mode` matters most to an operator: without it you cannot
+# tell a shadow observation from an action that was actually executed.
 COLUMNS = [
-    "timestamp", "workload", "detector_score", "fired",
-    "predicted_class", "confidence", "action", "result",
+    "ts", "workload", "detector_score", "fired",
+    "predicted_class", "confidence", "top_features", "action", "result", "mode",
 ]
 
 
@@ -45,6 +50,13 @@ def render(df) -> Table:
     table = Table(title=f"Prodrome — last {len(df)} decisions")
     for col in COLUMNS:
         table.add_column(col)
+
+    missing = [c for c in COLUMNS if c not in df.columns]
+    if missing:
+        # Say so loudly rather than rendering blanks. row.get(col, "") made a
+        # missing column indistinguishable from "we took no action", which is
+        # the one thing an operator must never be confused about.
+        table.caption = f"[bold red]MISSING COLUMNS: {', '.join(missing)}[/] — log does not match SETUP.md S7"
 
     for _, row in df.iterrows():
         fired = str(row.get("fired", ""))

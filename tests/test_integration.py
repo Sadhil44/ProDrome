@@ -186,46 +186,48 @@ def test_the_controller_can_execute_every_action_the_policy_table_emits():
     assert emitted <= handled, f"controller cannot execute: {sorted(emitted - handled)}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="controller.log_decision() writes 'timestamp' and omits top_features "
-           "and mode; SETUP.md §7 names ts, top_features and mode.",
-)
 def test_the_controller_writes_the_decision_log_columns_the_contract_names():
     """SETUP.md §7 pins the decision log at ts, workload, detector_score, fired,
     predicted_class, confidence, top_features, action, result, mode -- and says
     changing it requires telling everyone.
 
-    log_decision() writes `timestamp` instead of `ts` and has no top_features or
-    mode column at all. `mode` is what separates a shadow-mode observation from
-    an executed action, so its absence makes the control-arm comparison
-    (ground rule 4) unanswerable from the log. It also writes to
-    control/decisions.csv while SETUP.md §8 names data/decisions/log.csv.
+    This previously wrote `timestamp` instead of `ts` with no top_features and no
+    mode at all, which made ground rule 4's control-arm comparison unanswerable
+    from the log: you could not tell what Prodrome did from what it merely would
+    have done. Fixed, along with the path (SETUP.md §8 names
+    data/decisions/log.csv, not control/decisions.csv).
+
+    Checks the module-level constant, not a literal inside the function. An
+    earlier version of this test walked log_decision()'s body for a string list,
+    which meant that hoisting the header into a named constant made the test fail
+    with "could not find the header row" -- failing for a reason unrelated to the
+    defect it documents, while its strict xfail still looked satisfied.
     """
-    header = None
-    tree = ast.parse(CONTROLLER_SOURCE.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "log_decision":
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.List) and inner.elts and all(
-                    isinstance(e, ast.Constant) and isinstance(e.value, str) for e in inner.elts
-                ):
-                    header = [e.value for e in inner.elts]
-                    break
-    assert header is not None, "could not find log_decision()'s header row"
+    header = _string_list_assignment(CONTROLLER_SOURCE, "DECISION_LOG_COLUMNS")
     assert header == DECISION_LOG_COLUMNS
 
+    # And the writer must actually use it rather than keeping a second copy.
+    tree = ast.parse(CONTROLLER_SOURCE.read_text())
+    uses_it = any(
+        isinstance(node, ast.FunctionDef)
+        and node.name == "log_decision"
+        and any(
+            isinstance(n, ast.Name) and n.id == "DECISION_LOG_COLUMNS"
+            for n in ast.walk(node)
+        )
+        for node in ast.walk(tree)
+    )
+    assert uses_it, "log_decision() does not reference DECISION_LOG_COLUMNS"
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="dashboard/terminal.py COLUMNS mirrors the controller's actual header, "
-           "not SETUP.md §7 -- and row.get(col, '') hides any missing column.",
-)
+
 def test_the_dashboard_reads_the_decision_log_columns_the_contract_names():
-    """The reading half of the same divergence. dashboard/terminal.py declares
-    COLUMNS without top_features or mode and renders each cell with
-    `row.get(col, "")`, so a log that is missing a contract column displays as
-    blanks rather than failing -- an operator cannot tell "we took no action"
-    from "the column is gone".
+    """The reading half of the same divergence, now fixed.
+
+    dashboard/terminal.py declared COLUMNS without top_features or mode, mirroring
+    whatever the controller happened to write rather than the contract -- so both
+    halves drifted together and the divergence was invisible from either side. It
+    also rendered every cell with `row.get(col, "")`, which made a missing column
+    display as blanks; an operator could not tell "we took no action" from "the
+    column is gone". It now surfaces missing columns in the table caption.
     """
     assert _string_list_assignment(DASHBOARD_SOURCE, "COLUMNS") == DECISION_LOG_COLUMNS
