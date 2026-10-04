@@ -673,18 +673,196 @@ def test_a_firing_without_enough_history_does_not_act(live):
     assert log_rows()[-1]["action"] == "nothing"
 
 
-# --- known gap: the decision log's top_features column ----------------------
+# --- the decision log's top_features column ---------------------------------
+#
+# This was a strict xfail: classifier.predict() returned (label, confidence)
+# only, so evaluate_once had nothing to pass and log_decision wrote "", which
+# pandas reads back as NaN -- the entire explanation for "top_features is NaN
+# throughout" in the 3,276-decision export. Diagnosis widened the interface
+# additively (classifier.top_features(window) / explain(window, top_n)), so the
+# marker is gone and the behaviour is pinned instead. The tests below are what
+# the xfail becomes once a finding is actually fixed.
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "top_features is structurally always empty: classifier.predict() returns "
-        "(label, confidence) only, so evaluate_once has nothing to pass. This is "
-        "the whole explanation for 'top_features is NaN throughout' in tonight's "
-        "3,276-decision export -- it is not data loss upstream. Needs diagnosis to "
-        "widen the classifier interface; raised on crosstalk/announcements."
-    ),
-)
+
+class ExplainingClassifier(FakeClassifier):
+    """A classifier with the attribution capability, shaped like the real one.
+
+    Records the window it was handed, so a test can assert the attribution was
+    computed from the SAME window as the prediction rather than a different
+    slice of history -- an attribution over the wrong window is exactly the
+    failure diagnosis's ValueError on short windows exists to prevent.
+    """
+
+    def __init__(self, label, confidence, value="fs_writes_max=+0.140;fs_writes_std=+0.120"):
+        super().__init__(label, confidence)
+        self.value = value
+        self.explained = []
+
+    def top_features(self, window, top_n=3):
+        self.explained.append(window)
+        return self.value
+
+
+def run_explaining(apps_api, action, workload="nginx", classifier=None, history=None):
+    detector = FakeDetector()
+    classifier = ExplainingClassifier(label_for(action), 1.0) if classifier is None else classifier
+    result = controller.evaluate_once(
+        apps_api, workload, one_tick(), detector, classifier,
+        full_history() if history is None else history,
+    )
+    return result, detector, classifier
+
+
 def test_the_decision_log_carries_feature_attribution(live):
-    run_once(SpyAppsApi(replicas=1), "rolling_restart")
-    assert log_rows()[-1]["top_features"] != ""
+    _, _, classifier = run_explaining(SpyAppsApi(replicas=1), "rolling_restart")
+    row = log_rows()[-1]
+    assert row["top_features"] == classifier.value
+    assert row["top_features"] != ""
+
+
+def test_the_attribution_is_computed_from_the_window_that_was_predicted_on(live):
+    """One window, one prediction, one explanation.
+
+    If the attribution were recomputed from a different window it could name
+    features from history the decision was not made on -- a plausible-looking
+    reason for a decision that had another cause, which is worse than an empty
+    cell because an operator would act on it.
+    """
+    _, _, classifier = run_explaining(SpyAppsApi(replicas=1), "rolling_restart")
+    assert classifier.calls == 1
+    assert len(classifier.explained) == 1
+    window = classifier.explained[0]
+    assert len(window) == WINDOW_SIZE
+    assert list(window.columns) == METRICS
+
+
+def test_the_attribution_survives_the_csv_round_trip_in_one_field(live):
+    """Semicolon-separated, never comma: the value lives in a CSV cell and has to
+    come back out of `csv.DictReader` as ONE field, unsplit and still greppable.
+    """
+    value = "fs_writes_max=+0.140;fs_writes_std=+0.120;fs_writes_last=-0.104"
+    classifier = ExplainingClassifier(label_for("rolling_restart"), 1.0, value=value)
+    run_explaining(SpyAppsApi(replicas=1), "rolling_restart", classifier=classifier)
+    row = log_rows()[-1]
+    assert row["top_features"] == value
+    assert "," not in row["top_features"], "a comma would split the cell or force quoting"
+    assert len(row) == len(DECISION_LOG_COLUMNS), "the attribution leaked into other columns"
+    assert row["action"] == "rolling_restart" and row["result"] == "executed"
+
+
+def test_a_failed_action_still_records_its_attribution(live):
+    """The row an operator wants most: an action that may have half-landed, with
+    the reason it was chosen attached.
+    """
+    api = SpyAppsApi(replicas=1, raises=RuntimeError("409 Conflict"))
+    classifier = ExplainingClassifier(label_for("rolling_restart"), 1.0)
+    with pytest.raises(RuntimeError):
+        run_explaining(api, "rolling_restart", classifier=classifier)
+    row = log_rows()[-1]
+    assert row["result"] == "failed"
+    assert row["top_features"] == classifier.value
+
+
+def test_a_blocked_action_still_records_its_attribution(live, stop_file):
+    """A kill-switch block is a decision too, and `what would it have done, and
+    why` is the whole point of shadow mode.
+    """
+    run_explaining(ForbiddenApi(), "rolling_restart")
+    row = log_rows()[-1]
+    assert row["result"] == "blocked-kill-switch"
+    assert row["top_features"] != ""
+
+
+def test_dry_run_still_records_the_attribution_but_nothing_else():
+    """Attribution is an audit string, not cluster state: the shadow arm must
+    still explain itself while mutating nothing. Guards against "fixed" meaning
+    the shadow arm started calling a second model path with side effects.
+    """
+    _, detector, classifier = run_explaining(ForbiddenApi(), "rolling_restart")
+    row = log_rows()[-1]
+    assert row["mode"] == "shadow" and row["result"] == "dry-run"
+    assert row["top_features"] == classifier.value
+    assert controller.last_action_time == {}
+    assert detector.restarts == []
+
+
+def test_the_attribution_is_not_computed_on_a_short_window(live):
+    """`explain()` raises ValueError below WINDOW_SIZE, deliberately: a confident
+    attribution over the wrong amount of history is worse than none. So the
+    short-buffer path must not call it at all -- and must still write a row.
+    """
+    classifier = ExplainingClassifier(label_for("rolling_restart"), 1.0)
+    result = controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(), classifier,
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    assert result == "not-fired"
+    assert classifier.explained == [], "explain() was called on a short window"
+    assert classifier.calls == 0
+    row = log_rows()[-1]
+    assert row["top_features"] == ""
+    assert row["action"] == "nothing"
+
+
+def test_a_tick_the_detector_ignored_has_no_attribution():
+    """No prediction, so nothing to explain. The cell has to be empty rather
+    than stale from a previous tick.
+    """
+    classifier = ExplainingClassifier(label_for("rolling_restart"), 1.0)
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(fired=False), classifier,
+        full_history(),
+    )
+    assert classifier.explained == []
+    assert log_rows()[-1]["top_features"] == ""
+
+
+def test_a_classifier_without_the_capability_degrades_to_an_empty_cell(live):
+    """The published interface is consumed as published, and `top_features` is
+    optional: a classifier artifact predating the capability must not take the
+    control loop down over an audit string. Remediation still happens.
+    """
+    api = SpyAppsApi(replicas=1)
+    result, _, _ = run_once(api, "rolling_restart")  # FakeClassifier: no top_features
+    assert result == "executed"
+    assert log_rows()[-1]["top_features"] == ""
+
+
+def test_a_classifier_whose_attribution_raises_fails_loudly_before_acting(live):
+    """Deliberately NOT swallowed.
+
+    Swallowing it would recreate the defect this column just came out of: a
+    silently empty field indistinguishable from "no features mattered". It is
+    safe to be loud -- attribution runs before every rail and before any cluster
+    call, so the raise cannot leave a half-applied remediation behind. Asserted:
+    no API call, no cooldown recorded.
+    """
+    class Broken(FakeClassifier):
+        def top_features(self, window, top_n=3):
+            raise RuntimeError("tree decomposition blew up")
+
+    api = ForbiddenApi()
+    classifier = Broken(label_for("rolling_restart"), 1.0)
+    with pytest.raises(RuntimeError):
+        controller.evaluate_once(
+            api, "nginx", one_tick(), FakeDetector(), classifier, full_history()
+        )
+    assert controller.last_action_time == {}, "a crashed attribution still burned the cooldown"
+
+
+def test_the_shipped_classifier_publishes_the_attribution_capability():
+    """A contract check on diagnosis's published interface, by parsing rather
+    than importing: `import ml.classifier` loads or refits classifier.pkl, which
+    is most of the suite's runtime and not something this file needs.
+
+    If `top_features` were ever removed, every row would silently go back to ""
+    and the only passing-test signal would be the degradation test above.
+    """
+    source = REPO_ROOT / "ml" / "classifier.py"
+    tree = ast.parse(source.read_text())
+    defined = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+    assert {"predict", "top_features", "explain"} <= defined, (
+        f"ml/classifier.py no longer publishes the attribution interface: {sorted(defined)}"
+    )
