@@ -14,10 +14,88 @@ python -m eval.harness
 
 Writes `eval/results.csv`.
 
-**Not computed here:** recovery time, ours vs control. That needs Shravan's
-live controller and identical faults injected into both namespaces at once
-(Phase 4). This harness covers what's measurable now — Phase 2/3, single-arm,
-detector-only.
+**Not computed here:** recovery time, ours vs control. That is `recovery.py`
+plus `collect/twoarm.py` — see below. `harness.py` stays single-arm and
+detector-only: it answers "did we see it coming", the other half answers "and
+did acting on it beat stock Kubernetes".
+
+## `recovery.py` + `collect/twoarm.py` — the control arm
+
+Ground rule 4: *"we recovered the service" means nothing without "and stock
+Kubernetes didn't."* Two halves, split so the arguable part needs no cluster:
+
+| file | what it is | needs a cluster |
+|---|---|---|
+| `collect/twoarm.py` | injects the SAME fault into `prodrome` and `control` simultaneously, samples both arms' serving health from one loop | yes |
+| `eval/recovery.py` | turns those two files into recovery time per arm, per fault type, and refuses to publish a run that could not have produced a comparison | no |
+
+```bash
+python collect/twoarm.py --preflight                   # checks most of it with no cluster
+python collect/twoarm.py --campaign --load-attested    # the real run
+python -m eval.recovery --indir data/twoarm
+```
+
+Tests: `pytest eval/test_recovery.py collect/test_twoarm.py -q` — 60 tests, no
+cluster, no Docker, no files under `data/`.
+
+### Recovery time is not one number
+
+`data/chaos/runs.csv`'s `failure_ts` is non-null only for MEMORY_LEAK (30/30)
+and POD_KILL (10/10); it is **null for all 90 DISK_STRESS and all 30 CPU_HOG
+runs**, because those faults never actually fail — `end_ts` is just when
+`stress-ng` stopped. So two quantities, never pooled:
+
+- **`recovery_seconds`** (POD_KILL, MEMORY_LEAK) — first not-serving sample to
+  the first sample of a sustained-serving run. A real outage.
+- **`degradation_seconds`** (CPU_HOG, DISK_STRESS) — how long readiness-probe
+  latency sat outside *that arm's own* pre-injection band. These have no
+  recovery time to report, and the code cannot produce one for them.
+
+`NO_OUTAGE` is **counted, never scored as 0s**. A MEMORY_LEAK that Prodrome
+restarts before the OOMKill has no recovery time; scoring it as zero would hand
+the treatment arm a median of 0s against the control arm's real tens of seconds
+— a spectacular result made entirely of a missing measurement.
+
+### Two of four fault types cannot show a difference, by design
+
+From `control/policy.py`: CPU_HOG → `scale_out`, MEMORY_LEAK →
+`rolling_restart`, DISK_STRESS → `alert_only`, and POD_KILL has **no policy row
+at all** (falls through to `UNKNOWN` → `nothing`). For DISK_STRESS and POD_KILL
+the treatment arm is *specified* to behave like the control arm, so a tie is the
+design working. The table carries a `lever` and a `comparable` column beside
+every row, because a reader averaging four rows would otherwise conclude
+Prodrome does nothing.
+
+### It refuses to publish a run that proves nothing
+
+`attest()` has to pass before any number is a comparison:
+
+- **manifest-parity** — `infra/workloads.yaml` vs `infra/workloads-control.yaml`
+  normalised for namespace and comments. Currently **identical across 172
+  significant lines**, verified. The memory limit *is* the OOMKill threshold, so
+  a one-line drift here silently becomes the result.
+- **arm-isolation** — `control/controller.py`'s `NAMESPACE` is read, not assumed.
+- **treatment-arm-live** — the expensive failure mode. With `DRY_RUN = True`,
+  `execute_action()` returns `"dry-run"` before touching the API, so the
+  treatment arm *is* a second control arm and every row is a tautology. **This
+  attestation fails today.**
+- **pair-skew** — arms injected more than 5s apart saw different cluster states.
+- **load-parity** — an idle control arm recovers faster for reasons unrelated to
+  Prodrome.
+
+### Measured limitations (not hypothetical)
+
+- **Resolution.** Each `kubectl` call costs 600–900ms of startup and API
+  round-trip, so the health sampler achieved **6.4s** against a requested 5.0s.
+  Differences at or below that are reported as `tied_pairs`, not wins —
+  `sampling_resolution()` self-calibrates the band from the data. The first live
+  pair came back prodrome 15.2097s vs control 15.2036s and the table reported
+  "control faster" on a **6ms** difference; that is now a tie.
+- **Probe latency is a weak SLI.** It is a `redis-cli ping` / `pg_isready` /
+  `GET /` whose wall time is dominated by `kubectl exec` startup, not by the
+  workload. A `NO_DEGRADATION` row means the probe did not notice, not that
+  users would not have. The fix is a real request-latency column from
+  `collect/load/`; it needs no change to any definition above.
 
 ### Two findings worth knowing before reading the numbers
 

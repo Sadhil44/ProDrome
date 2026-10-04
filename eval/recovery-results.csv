@@ -1,0 +1,5 @@
+fault_type,kind,arm,lever,comparable,pairs,n_outage,n_no_outage,n_degraded,n_no_degradation,n_censored,n_no_data,median_recovery_s,p90_recovery_s,median_degradation_s
+MEMORY_LEAK,outage,control,rolling_restart,True,1,1,0,0,0,0,0,14.4,14.4,
+MEMORY_LEAK,outage,prodrome,rolling_restart,True,1,1,0,0,0,0,0,39.8,39.8,
+POD_KILL,outage,control,nothing,False,1,1,0,0,0,0,0,15.2,15.2,
+POD_KILL,outage,prodrome,nothing,False,1,1,0,0,0,0,0,15.2,15.2,
