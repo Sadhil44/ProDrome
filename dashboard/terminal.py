@@ -43,7 +43,7 @@ MAX_ROWS = 20
 # both halves drifted together and the divergence was invisible from either
 # side. `mode` matters most to an operator: without it you cannot tell a shadow
 # observation from an action that was actually executed.
-COLUMNS = ["timestamp", "workload", "detector_score", "fired", "predicted_class", "confidence", "action", "result"]
+COLUMNS = DECISION_LOG_COLUMNS
 
 
 def load_recent(path: Path = DECISIONS_LOG, max_rows: int = MAX_ROWS):
