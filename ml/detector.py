@@ -51,6 +51,13 @@ MIN_HEALTHY_VARIANCE = 1e-9    # metrics below this (perfectly constant) are dro
 MAX_MODE_FRACTION = 0.98
 POST_RESTART_SUPPRESS_TICKS = 32  # ~8 minutes at 15s ticks (Part 4.4)
 
+# The live path (update()) must not fold an anomalous tick into the healthy
+# reference, or a fault that runs for minutes trains the detector to accept it.
+# But excluding forever means a genuine baseline shift -- a deliberate scale-up,
+# traffic that doubles for good -- alarms indefinitely and never gets learned.
+# Cap the run of consecutive exclusions, then start accepting again.
+SELF_EXCLUDE_CAP = 20
+
 # A fault that only ever disturbs one metric (e.g. a pure CPU hog) can
 # never clear a k>=2 vote no matter how extreme it is. Escape hatch: a
 # single metric far enough past the normal threshold fires on its own,
@@ -67,6 +74,8 @@ class MetricDetector:
         self.prediction = None
         self.errors = deque(maxlen=ERROR_HISTORY)          # healthy-only reference distribution
         self.recent_errors = deque(maxlen=RECENT_WINDOW)   # always-live, tracks any observed tick
+        self._excluded = 0                                 # consecutive anomalous ticks withheld
+                                                           # from the reference (see update())
 
     def _z(self) -> float | None:
         """z-score of the recent window against the healthy-only reference."""
@@ -95,16 +104,48 @@ class MetricDetector:
         return error
 
     def update(self, value) -> tuple[float | None, bool]:
-        """Observe this tick, folding its error into both the recent
-        window and the long-term reference -- this IS the training step,
-        so only ever call this on healthy data."""
+        """Observe this tick, score it, and fold its error into the long-term
+        reference ONLY if it looked healthy.
+
+        This is the live path: production has no labels, so it cannot choose
+        between update() and score_only() per tick the way the offline replay
+        does. Two things therefore have to be true here, and neither used to be:
+
+        1. SCORE BEFORE TRAINING. This previously appended the error to
+           self.errors and then computed _z() against that same distribution,
+           so every tick was scored against a reference containing itself.
+           That made the score scale-invariant -- a 10x excursion and a 10^12x
+           excursion both produced z = 1.91 -- with a single-tick ceiling of
+           about (1/RECENT_WINDOW)*sqrt(ERROR_HISTORY) ~ 2.0 and a sustained
+           burst peaking near 3.9, all under Z_THRESHOLD = 4.0. Detector.score()
+           was arithmetically incapable of firing on a step change of any
+           magnitude, which is the whole of the observed "3 firings across 160
+           fault runs".
+
+        2. DO NOT TRAIN ON WHAT LOOKS LIKE A FAULT. self.errors is the
+           healthy-only reference (ground rule #1). Folding in anomalous ticks
+           lets a fault that runs for minutes become the new normal, which is
+           the slower desensitization on top of the arithmetic one.
+
+        The exclusion is capped: after SELF_EXCLUDE_CAP consecutive excluded
+        ticks the reference starts accepting again, so a genuine baseline shift
+        (a deliberate scale-up, a workload's traffic doubling for good) is
+        eventually learned instead of alarming forever.
+        """
         error = self._observe(value)
         if error is None:
             return None, False
 
-        self.errors.append(error)
         z = self._z()
-        return z, z is not None and z > self.threshold
+        fired = z is not None and z > self.threshold
+
+        if fired and self._excluded < SELF_EXCLUDE_CAP:
+            self._excluded += 1
+        else:
+            self._excluded = 0
+            self.errors.append(error)
+
+        return z, fired
 
     def score_only(self, value) -> tuple[float | None, bool]:
         """Observe this tick for prediction/recency purposes, but never let

@@ -16,10 +16,16 @@ OOMKill for MEMORY_LEAK, the kill for POD_KILL) and end_ts otherwise
 collect/chaos.py's docstring; lead time for those two is really "time
 before injection ended," not "time before a crash").
 
-NOT computed here: recovery time, ours vs control. That needs Shravan's
-live controller and identical faults injected into BOTH namespaces
-simultaneously (Phase 4) -- this harness covers what's measurable now,
-Phase 2/3, single-arm, detector-only.
+NOT computed here: recovery time, ours vs control. That now lives in
+`eval/recovery.py` (measurement, no cluster) plus `collect/twoarm.py`
+(paired injection into both namespaces at once). This module stays
+single-arm and detector-only: it answers "did we see it coming", and
+`eval/recovery.py` answers "and did acting on it beat stock Kubernetes".
+The two recovery columns below stay "N/A" on purpose -- they are not this
+module's to fill, and a number copied across from the other half would
+lose the attestations that say whether it may be published at all.
+
+    python -m eval.recovery --indir data/twoarm
 
 Does NOT use ml.replay.replay(): that calls Detector.score() ->
 WorkloadDetector.update() on every tick regardless of fault status, which is
@@ -232,8 +238,9 @@ def main() -> None:
     for k, v in fp_stats.items():
         print(f"  {k}: {v}")
 
-    print("\nrecovery time (ours vs control): N/A -- needs the live controller "
-          "and faults injected into both namespaces (Phase 4).")
+    print("\nrecovery time (ours vs control): not measured here -- run "
+          "`python -m eval.recovery` (needs a two-arm campaign from "
+          "`python collect/twoarm.py --campaign`).")
 
     out = Path("eval/results.csv")
     table.to_csv(out, index=False)

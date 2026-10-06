@@ -9,6 +9,17 @@ Metric scraper, chaos runner, load generation. Owned by Shaurya — see [SETUP.m
 | `scrape.py` | 3.2 | Export a time window of the 8 metrics from Prometheus → Parquet. `--minutes N` or `--start/--end`. |
 | `load/run-load.sh` | 4 | Diurnal load against all 6 workloads (prodrome + control). `DAYS=84` ≈ 14h. See `load/README.md`. |
 | `chaos.py` | 5 | Inject CPU_HOG / MEMORY_LEAK / DISK_STRESS / POD_KILL via `kubectl exec … stress-ng`; write `data/chaos/labels.csv`. `--campaign` or `--one`. |
+| `twoarm.py` | 7 | Control arm: inject the **same** fault into `prodrome` and `control` simultaneously, sample both arms' serving health. Writes `data/twoarm/{pairs,health}.csv`. `--preflight`, `--campaign`, `--one`. Measured by [`eval/recovery.py`](../eval/README.md). |
+
+> **`kubectl` on Windows.** The kubeconfig lives at `~/.kube/config` **inside
+> WSL** and there is no Windows one, so a bare `kubectl` from PowerShell or Git
+> Bash falls back to `localhost:8080` and every call fails with a connection
+> refused that looks like a dead cluster. `chaos.py`'s `KUBECTL_CMD` therefore
+> defaults to `wsl.exe -e kubectl` on `win32` and plain `kubectl` elsewhere.
+> Override with `PRODROME_KUBECTL`; `--preflight` prints which transport is in
+> use. (`-e` execs the binary directly, so the jsonpath arguments and
+> `sh -c "cat …"` pass through unparsed — routing through `bash -lc` breaks
+> both.)
 
 ### The two collection runs
 
