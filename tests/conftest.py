@@ -15,8 +15,8 @@ Two things live here rather than in a test module:
   point of both is what happens *between* stages, so the wiring is the fixture.
 
 Nothing here imports `kubernetes` or `ml.cnn`. CI installs pandas, pyarrow,
-numpy, scikit-learn and pytest and nothing else; that is deliberate
-(.github/workflows/tests.yml).
+numpy, scikit-learn, pytest and rich, and nothing else; that is deliberate
+(.github/workflows/tests.yml, which says why `rich` is on the list).
 """
 
 import sys
@@ -103,11 +103,18 @@ def shipped_classifier():
 class FakeController:
     """A controller that records instead of calling Kubernetes.
 
-    Stands in for control/controller.py, which cannot be imported here at all:
-    it does `from kubernetes import client, config` at module scope, and the
-    suite must run without the kubernetes client. What this asserts is the
-    contract cluster's controller has to satisfy -- an action it does not
-    recognise is a loud failure, not a shrug.
+    This used to stand in for control/controller.py because that module could
+    not be imported at all: it did `from kubernetes import client, config` at
+    module scope. That is fixed (the import is lazy, inside
+    connect_to_kubernetes()), and tests/test_integration.py now calls the real
+    execute_action and log_decision.
+
+    This stays for a different job it was always doing: asserting that an action
+    outside ACTION_VOCABULARY is a loud failure rather than a shrug. The real
+    controller returns the string "unknown-action" for one, which is correct for
+    a production loop that must not die on a bad lever -- but it means a run over
+    the samples would quietly produce rows nobody implemented. Raising here is
+    what turns that into a red build.
     """
 
     def __init__(self, dry_run: bool = True):

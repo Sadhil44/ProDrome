@@ -13,6 +13,22 @@ Either form works: `tests/conftest.py` puts the repo root on `sys.path`. Only th
 directory and bare `pytest` does not — so `from ml.features import ...` failed at
 collection.
 
+**CI runs more than this directory.** Three other seats keep tests next to their code, and
+until 2026-10-06 none of them ran on a push. `.github/workflows/tests.yml` now runs:
+
+```bash
+python -m pytest -q tests \
+  control/test_safety_rails.py control/test_policy_gates.py \
+  ml/test_explain.py ml/test_scale_sensitivity.py
+```
+
+The files stay where their owners keep them — `tests/CLAUDE.md` says other seats' tests live
+beside their code, so the invocation widened rather than the files moving. The paths are named
+explicitly so the install list (`pandas pyarrow numpy scikit-learn pytest rich`, deliberately
+not `requirements.txt`) stays honest about what the suite imports. **If you add a test file
+anywhere in the repo, add its path to that workflow**; `tests/test_ci_enforcement.py` fails if
+a `test_*.py` is neither run by CI nor listed in its `KNOWN_UNENFORCED` with a reason.
+
 ## The rule these follow
 
 Everything here runs from a **fresh clone** with no cluster, no Docker, and no collection
@@ -55,14 +71,27 @@ and so cannot run for anyone without a collection handoff.
 but "do they fit": every class the shipped classifier can emit has a policy row, every action
 policy emits is in the vocabulary a controller implements, the window `windows()` hands over
 satisfies `predict()`'s documented precondition, and `Detector.score()` really is positional
-in `METRICS` order. The controller stage is a fake, because `control/controller.py` imports
-`kubernetes` at module scope; the real one is inspected as source with `ast`.
+in `METRICS` order. The controller stage in the replay fixture is still a fake — it asserts that
+an action outside the vocabulary is a *loud* failure, which the real controller deliberately is
+not — but the controller's own behaviour is now checked by **calling it**: `execute_action` for
+every action in `POLICY`, `log_decision` with the CSV read back, and `dashboard.terminal`
+imported and rendered. These were source parses until 2026-10-06, because
+`control/controller.py` imported `kubernetes` at module scope and the module could not be
+loaded at all. That import is lazy now, and a test pins it: if it ever returns to module scope,
+CI says so instead of failing at collection with what looks like a broken runner.
 
 **`test_degradation.py`** — one stage broken at a time, asserting the next degrades safely.
 An empty detector gate → nothing downstream runs, *and* the classifier records zero calls;
 `POD_KILL` → `"nothing"` through the whole loop, never an action; sub-floor and
 sub-threshold confidence → no action but the class still logged; a window missing a metric
 or too short to fit a slope → a raise, not a prediction.
+
+**`test_ci_enforcement.py`** — the only file here that asserts about CI rather than about the
+pipeline, and it earns its place because the gap it guards was real for most of this project:
+`pytest tests` ran 83 tests and silently skipped the 76 safety-rail tests, the policy gates and
+the attribution identity. It fails if any `test_*.py` in the repo is neither run by the
+workflow nor listed in `KNOWN_UNENFORCED` with a reason, if the three load-bearing files are
+dropped from the invocation, or if CI starts installing `requirements.txt`.
 
 **`conftest.py`** — the sample-data fixtures, the replayed firing log (session-scoped; it is
 the most expensive thing in the suite) and the four-stage `run_loop` both of the above drive.
@@ -85,20 +114,28 @@ The wiring lives in a fixture because what both files test is the seams.
   got `AttributeError`. Found by writing a test that imports it from pytest, which is by
   definition not that `__main__`.
 
-## Open defects this suite records as strict xfails
+## Defects this suite recorded as strict xfails — all four now fixed
 
-Four findings sit in the suite as `@pytest.mark.xfail(strict=True)` rather than as red
-builds. They are other seats' files, and testing asserts contracts rather than renegotiating
-them — but a finding that only exists in a report gets lost. `strict=True` means that when
-the owner fixes it the test **XPASSes and CI goes red**, which is the signal to delete the
-marker. None are speculative; all were reproduced.
+`tests/` carries **no xfails today**. It carried four, as `@pytest.mark.xfail(strict=True)`
+rather than red builds: they were other seats' files, and testing asserts contracts rather
+than renegotiating them — but a finding that only exists in a report gets lost. `strict=True`
+means that when the owner fixes it the test **XPASSes and CI goes red**, which is the signal to
+delete the marker. That is exactly what happened to all four; the tests remain as regression
+guards, now passing.
 
-| Where | What |
-|---|---|
-| `control/controller.py` | `execute_action()` branches only on `"restart"`. Policy emits `scale_out`, `rolling_restart`, `alert_only`. The two vocabularies do not intersect, so wired up as written every decision logs as `unknown-action` and nothing is ever remediated — and `DRY_RUN=True` hides it, because the dry-run branch returns before the comparison. |
-| `control/controller.py` | `log_decision()` writes `timestamp`, not `ts`, and has no `top_features` or `mode` column. `mode` is what separates a shadow observation from an executed action, so the control-arm comparison (ground rule 4) is unanswerable from the log. It also writes `control/decisions.csv` while `SETUP.md` §8 names `data/decisions/log.csv`. |
-| `dashboard/terminal.py` | `COLUMNS` mirrors the controller's actual header rather than `SETUP.md` §7, and `row.get(col, "")` renders a missing column as blanks — an operator cannot tell "took no action" from "the column is gone". |
-| `ml/classifier.py` | `predict()` never checks `len(window) == WINDOW_SIZE`. Any length from 2 up summarizes fine and returns a confident label computed over the wrong amount of history. `windows()` never produces one, so this only bites a caller that assembles a window itself — which is what the controller does on a short buffer at startup. |
+| Where | What it was | Now |
+|---|---|---|
+| `control/controller.py` | `execute_action()` branched only on `"restart"`. Policy emits `scale_out`, `rolling_restart`, `alert_only`. The vocabularies did not intersect, so every decision would log as `unknown-action` and nothing would ever be remediated — and `DRY_RUN=True` hid it, because the dry-run branch returns before the comparison. | Fixed. Now checked by *calling* `execute_action` for every action in `POLICY`, with a spy API, and requiring a mutating action to actually issue its write. |
+| `control/controller.py` | `log_decision()` wrote `timestamp`, not `ts`, with no `top_features` and no `mode`. `mode` separates a shadow observation from an executed action, so the control-arm comparison (ground rule 4) was unanswerable from the log. It also wrote `control/decisions.csv` while `SETUP.md` §8 names `data/decisions/log.csv`. | Fixed. Now checked by calling `log_decision` and reading the CSV back — header, row width, `ts` parsing, `mode` derived from `DRY_RUN`. |
+| `dashboard/terminal.py` | `COLUMNS` mirrored the controller's actual header rather than `SETUP.md` §7, and `row.get(col, "")` rendered a missing column as blanks — an operator could not tell "took no action" from "the column is gone". | Fixed, and then fixed harder: diagnosis replaced both `COLUMNS` and the path with imports from the controller, so the divergence is impossible rather than merely detectable. The path was separately wrong (`control/decisions.csv`), which no column check could have caught; both halves are pinned now. |
+| `ml/classifier.py` | `predict()` never checked `len(window) == WINDOW_SIZE`. Any length from 2 up summarized fine and returned a confident label computed over the wrong amount of history — which is what the controller assembles on a short buffer at startup. | Fixed. |
+
+The two xfails in the repo today are both in `control/test_policy_gates.py` and are **non-strict
+on purpose**: CPU_HOG's `min_confidence` equals the abstention floor so its gate is dead code,
+and a mutating action unlocks cheaper than an alert. The fix is a threshold value, which is a
+project decision on `crosstalk/decisions`, not something a test should force. Do not add
+`xfail_strict` to a pytest config — there is deliberately no `pytest.ini`, and adding one would
+turn two recorded findings into a red build.
 
 And one finding that is **not** an xfail, because its mechanism is now pinned by a passing
 test (`test_update_cannot_fire_on_an_arbitrarily_extreme_anomaly`):
@@ -127,10 +164,11 @@ it should cover, given what the suite already establishes:
   across 3 workloads, 171 fired ticks, via the `score_only()` replay path — so there is
   something to show. Say plainly on screen that the *live* `Detector.score()` path would show
   almost nothing, and why (the desensitization finding above).
-- **What it needs that does not exist yet**: a controller whose `execute_action()` handles the
-  real action vocabulary, and a decision-log writer at the `SETUP.md` §7 columns. Until both
-  land the execute stage has to be a stand-in, and the demo should say so rather than
-  implying the loop is closed.
+- **Both blockers are gone.** This used to say the demo needed a controller whose
+  `execute_action()` handles the real action vocabulary and a decision-log writer at the
+  `SETUP.md` §7 columns, neither of which existed. Both landed, and `control.controller` now
+  imports without a kubernetes client — so the demo can drive the **real** controller with
+  `DRY_RUN` left at `True` rather than a stand-in, and say honestly that the loop is closed.
 
 ## What this suite deliberately does not do
 

@@ -21,8 +21,61 @@ jobs:
       # suite reads data/samples/ and exercises the contracts; these are what it
       # actually needs. If a test ever needs more, add it here explicitly rather
       # than reaching for the full file.
+      #
+      # `rich` is the one addition, and it is here for a reason:
+      # tests/test_integration.py now IMPORTS dashboard/terminal.py and calls
+      # render() instead of parsing the file for a `COLUMNS = [...]` literal.
+      # Parsing could only pin the list. Importing also proves (a) the dashboard
+      # surfaces a missing decision-log column instead of rendering it as a blank
+      # cell, and (b) DECISIONS_LOG is the same path the controller writes -- the
+      # defect where the dashboard read control/decisions.csv while the
+      # controller wrote data/decisions/log.csv, so it rendered "waiting for
+      # decisions" forever and nothing failed. A source parse could not see that
+      # at all, and as of 2026-10-06 it cannot even see the columns: the literal
+      # is now `COLUMNS = DECISION_LOG_COLUMNS`, imported from the controller.
+      # `rich` is a small pure-Python package (no cluster, no compiler, no wheels
+      # of consequence), so the trade is a few seconds of install for checks that
+      # actually run the code. It is NOT a licence to install the rest of
+      # requirements.txt.
       - name: Install test dependencies
-        run: pip install pandas pyarrow numpy scikit-learn pytest
+        run: pip install pandas pyarrow numpy scikit-learn pytest rich
 
+      # One invocation, widened -- NOT a second job, and NOT by moving files.
+      #
+      # Why widened rather than moved: tests/CLAUDE.md gives `tests/` to the
+      # testing seat and says every other seat's tests live next to their code.
+      # control/test_safety_rails.py is cluster's file -- it deliberately re-pins
+      # DECISION_LOG_COLUMNS itself "so this file does not depend on Aahan's
+      # fixtures" -- and ml/test_explain.py is diagnosis's. Dragging them into
+      # tests/ would move four files into a directory their owners do not own and
+      # would not edit. CI is a consumer of those tests, not their owner, so the
+      # invocation moves and the files stay put.
+      #
+      # Why one invocation rather than a second step: ml.classifier loads or
+      # refits ml/classifier.pkl at import, which is most of the suite's runtime,
+      # and classifier.pkl is gitignored so CI always refits. A second pytest
+      # process would pay that cost twice for nothing.
+      #
+      # Why the files are named rather than `pytest tests control ml`: the
+      # install list above is only honest if the import surface is bounded. A
+      # directory glob would silently drag in the next file that imports torch or
+      # the kubernetes client and break CI for a reason that has nothing to do
+      # with the change that triggered it. Naming them makes adding a dependency
+      # a deliberate act, as tests/CLAUDE.md asks.
+      #
+      # Adding a test file of your own: add its path here. If you forget,
+      # tests/test_ci_enforcement.py fails and tells you -- that is what it is
+      # for, so the list cannot rot into a silent gap.
+      #
+      # No pytest.ini / xfail_strict: control/test_policy_gates.py marks two
+      # findings non-strict on purpose (the fix is a threshold value, which is a
+      # project decision on crosstalk/decisions). Turning those strict here would
+      # convert a recorded finding into a red build.
       - name: Run the contract suite
-        run: python -m pytest tests -q
+        run: >
+          python -m pytest -q
+          tests
+          control/test_safety_rails.py
+          control/test_policy_gates.py
+          ml/test_explain.py
+          ml/test_scale_sensitivity.py
