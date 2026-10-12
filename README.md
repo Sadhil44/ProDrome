@@ -34,99 +34,72 @@ The detector never sees a fault during training — real failures can't be enume
 
 Every claim is measured against a control arm running identical workloads and identical faults with no Prodrome — "we recovered the service" means nothing without "and stock Kubernetes didn't."
 
-## Status
+## Does it work?
 
-Draft, team of four, open source (Apache 2.0). Currently Phase 0 — see [PRD.md](PRD.md) §10 for the phase breakdown and exit criteria.
+**We don't know yet, and that is the honest answer.** The control-arm comparison — the only thing that could answer it — has been built but not yet run under load. Everything below is what has actually been measured.
+
+### What is measured
+
+The pipeline runs end to end on real data: 11,946 metric samples across 160 labeled fault runs on `nginx`, `postgres` and `redis`, producing 3,276 logged decisions through detector → classifier → policy → controller.
+
+**Detector.** On known-clean windows the false-positive rate is **5.0%**, against a **61.5%** firing rate inside fault windows — a 9.1× separation, or 1.86 false positives per workload-hour. About 40% of all firings are a *post-fault tail* lasting ~300s, not false alarms on healthy traffic. Lead time, for the one class with a true failure instant, is a median of **35.8s** before failure.
+
+**Classifier.** 0.92 accuracy and 0.82 macro F1 on held-out runs. Read the macro number, not accuracy: the test set is 65% `DISK_STRESS`, which classifies at 0.98 F1 and drags the aggregate up. `MEMORY_LEAK` sits at **0.61** and is the weak class.
+
+### What is measured and is bad news
+
+These are the results that matter most, because they bound what the system can currently claim.
+
+**The model never abstains.** Train on two fault types, hold the third out, and ask what it does with a fault it has never seen. On real data it is confidently wrong — above the 0.80 threshold that triggers a real action — on **71.5%** of unseen-fault windows, and correctly abstains on **0%** of them. A confidence floor is not novelty detection. This is the single strongest reason the controller stays in dry-run.
+
+**`CPU_HOG` is diagnosed from the wrong evidence.** Per-prediction attribution puts only **6.0%** of the decision on CPU metrics and ~80% on memory and filesystem. Deleting *every* CPU feature makes `CPU_HOG` classification **better** (F1 0.883 → 0.936, consistent across 7 random seeds). The model has learned the fault injector's memory and I/O footprint, not CPU pressure — so the `CPU_HOG` result is not evidence that Prodrome detects CPU exhaustion, and would not be expected to transfer to real application load.
+
+**A fixed analysis window cannot represent half the fault classes.** The window is 20 samples at 15s = 5.00 minutes. `MEMORY_LEAK` runs median 87.5s and `POD_KILL` 8.7s, so **zero** runs of either are long enough to contain one full window. The two classes with high F1 are exactly the two injected at ~300s — almost precisely the window length. Reported accuracy therefore substantially measures how well each fault's duration happens to match the window, not diagnostic skill.
+
+### Safety
+
+The controller runs with `DRY_RUN = True` and decides without acting. Four defects were found in its safety rails by testing them against an adversarial caller, every one invisible while dry-run was on — including `scale_out` *removing* capacity when a deployment was already above its replica cap, and a failed API call leaving no audit row and no cooldown, so the loop would retry every tick forever with no trace. The rails now run in CI on every push, alongside 238 tests total.
 
 ## Getting started
 
-New to the repo? Start with [SETUP.md](SETUP.md), then read your own guide in [docs/guides/](docs/guides/):
+Reproducing the analysis needs no cluster and no Docker — just the Python dependencies in [requirements.txt](requirements.txt):
 
-| Area | Owner | Guide |
-|---|---|---|
-| Cluster, workloads, controller | Shravan | [docs/guides/shravan.md](docs/guides/shravan.md) |
-| Prometheus, chaos, evaluation | Shaurya | [docs/guides/shaurya.md](docs/guides/shaurya.md) |
-| Detector (Signal) | Sagar | [docs/guides/sagar.md](docs/guides/sagar.md) |
-| Classifier and policy (Diagnosis) | Sadhil | [docs/guides/sadhil.md](docs/guides/sadhil.md) |
-| Testing and CI | Aahan | [docs/guides/aahan.md](docs/guides/aahan.md) |
-
-Full spec: [PRD.md](PRD.md). Ground rules and conventions: [SETUP.md](SETUP.md) §10.
-
-## The team forum — how to connect
-
-We coordinate through a shared CCP forum that both people and coding agents read and write.
-It matters here because §8 has the five areas exchange **files, not services**, so nothing
-otherwise warns you when someone changes a column, a metric order or a threshold.
-
-**The current URLs live in [`forum/CURRENT-URLS.md`](forum/CURRENT-URLS.md), with a timestamp
-saying when they were last verified.** Read the timestamp before trusting it — see
-*If it's dead* below. The session name is `prodrome` and never changes.
-
-There are four ways in, depending on what you want:
-
-### 1. Just look at it — browser, nothing to install
-
-Open the **web view** URL from `forum/CURRENT-URLS.md`. It shows who is working on what right
-now, the activity feed, and every entry with its full history. Refreshes every few seconds.
-Start here if you only want to know what's happened.
-
-### 2. Command line — if you already have `ccp-client`
-
-```sh
-ccp-client subscribe prodrome --server <FORUM-API-URL>
-ccp-client brief-me prodrome              # what's on the board
-ccp-client master-instructions prodrome   # the rules
+```bash
+python -m ml.train        # classifier, split by run: report, confusion matrix, importances
+python -m ml.abstention   # the held-out-fault safety numbers
+python -m ml.ablation     # is a fault class detected from its own metric?
+python -m ml.classifier   # refit and re-pickle the shipped model
+python -m dashboard.terminal   # live view over the decision log
 ```
 
-### 3. New machine — the installer
+Running the full loop against a cluster, and the two-arm comparison, needs a kind cluster and the workload manifests in [`infra/`](infra/). [SETUP.md](SETUP.md) has the setup path and the data contracts; [PRD.md](PRD.md) is the full spec.
 
-```sh
-sudo apt install -y python3-venv python3-pip     # do this FIRST, see below
-export CCP_AGENT_NAME=<yourname>-<aspect>        # e.g. sagar-signal
-curl -fsSL <WEB-VIEW-URL>/setup-client.sh | sh
-```
+### Repository layout
 
-Then **restart Claude Code / Codex**. This installs `ccp-client`, subscribes it, and registers
-an MCP server named `ccp-forum`.
+| Path | What's in it |
+|---|---|
+| [`ml/`](ml/) | Detector, classifier, feature extraction, and the analysis tools behind the numbers above |
+| [`control/`](control/) | Policy table and the Kubernetes controller, with its safety rails |
+| [`collect/`](collect/) | Metric scraping, fault injection, and the two-arm campaign harness |
+| [`eval/`](eval/) | Recovery-time measurement and the evaluation harness |
+| [`infra/`](infra/) | Cluster config and workload manifests for both the treatment and control arms |
+| [`dashboard/`](dashboard/) | Terminal view over the decision log |
+| [`tests/`](tests/) | Contract and integration tests; runs from a fresh clone with no cluster |
 
-> **Install `python3-venv` and `python3-pip` before running the installer.** A stock Ubuntu WSL
-> image has neither, and without them the MCP's virtualenv is built empty and the install
-> **fails silently** — you end up with a working `ccp-client` next to a `ccp-forum` MCP that
-> never loads, and nothing in the output says why. Linux/macOS/WSL only; the client needs
-> glibc 2.38+ (Ubuntu 24.04+).
+## Methodology notes
 
-### 4. Point your agent at it
+A few conventions that the numbers above depend on, and that are easy to get wrong:
 
-Once the MCP is registered, start an agent task with:
+**Split by run, never by row.** Sliding windows share 19 of their 20 samples, so a random split trains the model on near-duplicates of its own test set. Training uses `constant`-pattern runs and tests on `ramp`-pattern runs. Accuracy above ~0.97 on this data should be assumed to be this bug until checked.
 
-> Use the `ccp-forum` MCP, session `prodrome`. You are the **signal** agent
-> (or `cluster` / `collect` / `diagnosis` / `testing`). Read `master_instructions` first
-> and follow it.
+**Report per fault type, never one aggregate.** The aggregate hides the class that hasn't improved — which, here, is consistently the one whose remediation is the destructive one.
 
-You don't need to explain the forum to it — the rules are on the board, and the `CLAUDE.md`
-in each directory carries the coordination line, so an agent working in `ml/` or `control/`
-picks it up without being told.
+**`end_ts` is not a failure instant.** For `CPU_HOG` and `DISK_STRESS` the injector stops and the workload recovers; nothing fails. Lead-time and recovery numbers for those classes measured from end-of-injection are meaningless, and are not reported.
 
-### How the board is organised
-
-One shelf per area — `cluster`, `collect`, `signal`, `diagnosis`, `testing` — each with
-`updates` (progress) and `interfaces` (the contracts other areas consume). The shared
-`crosstalk` shelf carries `announcements`, `blockers`, `decisions` and `questions`. The
-condensed project plan is `prodrome-plan-v1` in `crosstalk/decisions`.
-
-### If it's dead
-
-Likely, and not your fault. The server runs on Sadhil's laptop behind Cloudflare **quick**
-tunnels, which are ephemeral by design: every restart mints a new random hostname, and they
-have rotated as often as every 30–60 minutes. A watchdog reopens the tunnel and republishes
-the board automatically, so the forum recovers on its own — but the new hostname still has to
-reach you out of band, because a URL you cannot resolve is a board you cannot read.
-
-So: if `forum/CURRENT-URLS.md` is more than an hour old, or the URL just doesn't resolve,
-**ping Sadhil** rather than assuming the forum is gone. It also only runs while his laptop is
-awake. Full setup, hosting and troubleshooting: [`forum/HANDOFF.md`](forum/HANDOFF.md) and
-[`forum/README.md`](forum/README.md).
+**Results must be reproducible from a fresh clone.** Model artifacts are gitignored and refit from the module that owns them; a result that depends on a pickle nobody else can regenerate is not a result.
 
 ## What it doesn't do
 
 No cross-service root cause analysis. No log or trace analysis — metrics only. Not a general replacement for the horizontal autoscaler. No hosted service. No claim of novelty — this is a reimplementation and extension of published research, and says so.
+
+Open source, Apache 2.0.
