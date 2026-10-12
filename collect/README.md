@@ -9,7 +9,15 @@ Metric scraper, chaos runner, load generation. Owned by Shaurya — see [SETUP.m
 | `scrape.py` | 3.2 | Export a time window of the 8 metrics from Prometheus → Parquet. `--minutes N` or `--start/--end`. |
 | `load/run-load.sh` | 4 | Diurnal load against all 6 workloads (prodrome + control). `DAYS=84` ≈ 14h. See `load/README.md`. |
 | `chaos.py` | 5 | Inject CPU_HOG / MEMORY_LEAK / DISK_STRESS / POD_KILL via `kubectl exec … stress-ng`; write `data/chaos/labels.csv`. `--campaign` or `--one`. |
-| `twoarm.py` | 7 | Control arm: inject the **same** fault into `prodrome` and `control` simultaneously, sample both arms' serving health. Writes `data/twoarm/{pairs,health}.csv`. `--preflight`, `--campaign`, `--one`. Measured by [`eval/recovery.py`](../eval/README.md). |
+| `twoarm.py` | 7 | Control arm: inject the **same** fault into `prodrome` and `control` simultaneously, sample both arms' serving health. Writes `data/twoarm/{pairs,health}.csv`. `--preflight`, `--campaign`, `--one`, `--settle-gate`, `--order rotate`. Measured by [`eval/recovery.py`](../eval/README.md). |
+
+`--settle-gate` waits for **both** arms to be Ready and restart-stable before
+each pair, so a pod still in CrashLoopBackOff from the last fault cannot be
+sampled as the next pair's quiet baseline. It does **not** replace `--gap`'s
+other job — keeping a pair out of the detector's post-restart dead zone — and
+that bias runs one way, against Prodrome. `--order rotate` keeps every prefix
+of an interrupted overnight campaign balanced across fault types and workloads.
+Full command and caveats: [`eval/README.md`](../eval/README.md).
 
 > **`kubectl` on Windows.** The kubeconfig lives at `~/.kube/config` **inside
 > WSL** and there is no Windows one, so a bare `kubectl` from PowerShell or Git

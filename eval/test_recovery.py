@@ -587,6 +587,174 @@ def test_end_to_end_null_experiment_shows_no_difference():
     assert not d["comparable"]          # POD_KILL has no lever -- a designed tie
 
 
+# --- shadow-mode measurement: the baseline and the noise floor --------------
+#
+# These exist because DRY_RUN=True is not a temporary inconvenience, it is the
+# condition the real campaign ran under. Everything below checks that the two
+# things that ARE true in that condition stay true, and -- more importantly --
+# that the one thing that is NOT true cannot be computed by accident.
+
+def _shadow_corpus(n: int = 6, fault: str = "MEMORY_LEAK",
+                   down_by_pair: list[tuple[int, int]] | None = None):
+    """n pairs where both arms are stock Kubernetes, with per-arm outage
+    lengths given as (treatment_down_samples, control_down_samples)."""
+    down_by_pair = down_by_pair or [(5, 5)] * n
+    frames, pairs = [], []
+    for i, (td, cd) in enumerate(down_by_pair):
+        start = T0 + pd.Timedelta(minutes=20 * i)
+        pairs.append(pair(f"P_{i:03d}", fault, start=start))
+        for arm, d in ((TREATMENT_ARM, td), (CONTROL_ARM, cd)):
+            frames.append(health(arm, "redis",
+                                 [True] * 4 + [False] * d + [True] * 14, start=start))
+    return recovery.measure(pd.concat(pairs, ignore_index=True),
+                            pd.concat(frames, ignore_index=True))
+
+
+def test_pooling_the_arms_is_refused_once_prodrome_is_live():
+    """The precondition IS the function. Both arms may be pooled into one
+    baseline only while the treatment arm is inert; the moment Prodrome acts,
+    pooling averages the treatment into the very baseline it is supposed to be
+    measured against. Refusing is the whole safety property, so it is tested
+    before the arithmetic."""
+    m = _shadow_corpus()
+    with pytest.raises(ValueError, match="only valid while the treatment arm is inert"):
+        recovery.stock_baseline_table(m, shadow_mode=False)
+
+
+def test_pooled_baseline_doubles_n_and_keeps_censoring_visible():
+    """Pooling is worth doing precisely because it doubles n -- and worth
+    distrusting unless the censored rows stay beside the median, because a
+    censored row is a recovery SLOWER than everything in the median and
+    dropping it silently biases the bar DOWN, making Prodrome's job easier."""
+    # 5 ordinary pairs plus one where the control arm never came back.
+    frames, pairs = [], []
+    for i in range(5):
+        start = T0 + pd.Timedelta(minutes=20 * i)
+        pairs.append(pair(f"P_{i:03d}", "MEMORY_LEAK", start=start))
+        for arm in (TREATMENT_ARM, CONTROL_ARM):
+            frames.append(health(arm, "redis",
+                                 [True] * 4 + [False] * 4 + [True] * 14, start=start))
+    start = T0 + pd.Timedelta(minutes=200)
+    pairs.append(pair("P_CENS", "MEMORY_LEAK", start=start))
+    frames.append(health(TREATMENT_ARM, "redis", [True] * 4 + [False] * 4 + [True] * 14,
+                         start=start))
+    frames.append(health(CONTROL_ARM, "redis", [True] * 4 + [False] * 18, start=start))
+
+    m = recovery.measure(pd.concat(pairs, ignore_index=True),
+                         pd.concat(frames, ignore_index=True))
+    b = recovery.stock_baseline_table(m, shadow_mode=True).iloc[0]
+    assert b["pairs"] == 6
+    assert b["arm_rows"] == 12 and b["arms"] == 2      # n doubled by pooling
+    assert b["n_measured"] == 11                       # the censored row has no number
+    assert b["censored_rows"] == 1                     # and is reported, not dropped
+    assert b["median_s"] is not None and b["iqr_s"] is not None
+
+
+def test_baseline_reports_spread_not_just_a_median():
+    """A median with no spread beside it is how an n=3 result gets quoted like
+    an n=300 one."""
+    m = _shadow_corpus(down_by_pair=[(2, 2), (4, 4), (6, 6), (8, 8), (10, 10), (12, 12)])
+    b = recovery.stock_baseline_table(m, shadow_mode=True).iloc[0]
+    for col in ("min_s", "p25_s", "median_s", "p75_s", "p90_s", "max_s", "iqr_s"):
+        assert b[col] is not None, col
+    assert b["min_s"] < b["median_s"] < b["max_s"]
+    assert b["iqr_s"] > 0
+
+
+def test_noise_floor_is_zero_when_the_arms_really_are_identical():
+    """The self-check. Prodrome is off, the arms are the same system, so the
+    harness must report no difference. A non-zero answer here is a bug in the
+    harness, never a result."""
+    nf = recovery.shadow_noise_floor(_shadow_corpus(), tie_band=5.0).iloc[0]
+    assert nf["pairs_in_delta"] == 6
+    assert nf["median_delta_s"] == 0.0
+    assert nf["max_abs_delta_s"] == 0.0
+    assert nf["tied"] == 6
+    assert nf["nominally_prodrome_faster"] == 0
+    assert nf["nominally_control_faster"] == 0
+
+
+def test_noise_floor_sets_a_bar_a_live_run_has_to_clear():
+    """With Prodrome OFF the arms still differ pair to pair -- OOMKill timing,
+    kubelet scheduling, kubectl jitter. `min_detectable_effect_s` is the p90 of
+    that, and it is the number that makes a future live result readable: an
+    advantage smaller than this is indistinguishable from the null run."""
+    # Arms differ by 0,5,10,15,20,25s with Prodrome switched off.
+    m = _shadow_corpus(down_by_pair=[(4, 4), (5, 4), (6, 4), (7, 4), (8, 4), (9, 4)])
+    nf = recovery.shadow_noise_floor(m, tie_band=5.0).iloc[0]
+    assert nf["max_abs_delta_s"] == 25.0
+    # The bar is never below the sampling resolution even if the deltas are.
+    assert nf["min_detectable_effect_s"] >= 5.0
+    assert nf["min_detectable_effect_s"] >= nf["median_abs_delta_s"]
+
+
+def test_noise_floor_never_reports_a_bar_below_the_sampling_resolution():
+    """A harness that measured zero difference has not proven it can resolve
+    one. The floor is max(p90|delta|, tie_band) so the bar can never be
+    narrower than the grid the measurement sits on."""
+    nf = recovery.shadow_noise_floor(_shadow_corpus(), tie_band=6.4).iloc[0]
+    assert nf["max_abs_delta_s"] == 0.0
+    assert nf["min_detectable_effect_s"] == 6.4
+
+
+def test_a_lopsided_sign_split_is_visible_as_a_harness_asymmetry():
+    """Under a true zero the sign split should be roughly even. An all-one-way
+    split means one arm is being measured differently from the other -- a bug
+    in MY harness -- and it has to be visible rather than reading as an
+    effect, because there is no treatment to have caused one."""
+    m = _shadow_corpus(down_by_pair=[(8, 4)] * 6)        # treatment always 20s slower
+    nf = recovery.shadow_noise_floor(m, tie_band=5.0).iloc[0]
+    assert nf["nominally_control_faster"] == 6
+    assert nf["nominally_prodrome_faster"] == 0
+
+
+def test_no_decision_log_means_no_counterfactual_and_says_so():
+    """Shadow mode's consolation prize is "Prodrome would have acted at t+22s",
+    and it needs the controller to have been RUNNING and logging. When it was
+    not, the report must SAY there is no counterfactual rather than quietly
+    omitting the section -- the gap between "decided not to act" and "was never
+    asked" is the whole difference."""
+    a = recovery.attest_counterfactual_available(None, "data/decisions/log.csv")
+    assert not a.ok
+    assert "no decision log" in a.detail
+    assert "NO counterfactual" in a.detail
+
+
+def test_a_counterfactual_is_never_reported_as_a_measured_recovery():
+    """Even with a log present the attestation has to keep the label attached,
+    because a counterfactual quoted without one becomes a result by Tuesday."""
+    log = pd.DataFrame([dict(ts=T0, action="rolling_restart", mode="shadow")])
+    a = recovery.attest_counterfactual_available(log)
+    assert a.ok
+    assert "NOT a measured recovery" in a.detail
+
+
+def test_counterfactual_does_not_veto_publishing_a_live_comparison():
+    """It is a note, not an attestation: a live campaign with real measured
+    recoveries does not need a counterfactual to be publishable, and letting
+    its absence block publication would be wrong in the opposite direction."""
+    atts = recovery.attest(controller_namespace="prodrome", dry_run=False)
+    assert "counterfactual-available" not in {a.name for a in atts}
+
+
+def test_render_separates_the_baseline_from_the_comparison_it_is_not():
+    """The failure mode this whole report exists to prevent is a stock-K8s
+    baseline being read as a Prodrome result. They must not look alike on the
+    page."""
+    m = _shadow_corpus()
+    text = recovery.render(
+        recovery.per_fault_arm_table(m), recovery.paired_delta_table(m),
+        recovery.attest(controller_namespace="prodrome", dry_run=True),
+        notes=[recovery.attest_counterfactual_available(None)],
+        baseline=recovery.stock_baseline_table(m, shadow_mode=True),
+        noise=recovery.shadow_noise_floor(m, tie_band=5.0))
+    assert "PUBLISHABLE AS A CONTROL-ARM COMPARISON: NO" in text
+    assert "STOCK-KUBERNETES BASELINE" in text
+    assert "HARNESS NOISE FLOOR" in text
+    assert "true delta is ZERO by construction" in text
+    assert "NO counterfactual" in text
+
+
 def main() -> None:
     raise SystemExit(pytest.main([__file__, "-q"]))
 

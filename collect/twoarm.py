@@ -112,6 +112,43 @@ TRAIL_SECONDS = 300.0
 # injection, on each arm separately (eval.recovery.latency_band).
 LEAD_SECONDS = 90.0
 
+# --- the settle gate: what the blind gap was actually trying to buy ---------
+#
+# `chaos.DEFAULT_GAP` is ~9 minutes of unconditional sleep between pairs. It
+# exists for one reason stated in collect/chaos.py: a pair scheduled inside the
+# detector's post-restart dead zone cannot fire on the treatment arm, so the
+# control arm "wins" for a purely scheduling reason.
+#
+# That reasoning is sound and it is NOT what this gate replaces. The gate
+# replaces the OTHER thing the blind sleep was silently doing: hoping that
+# whatever the previous pair broke had finished unbreaking. A MEMORY_LEAK pair
+# leaves a pod that may still be in CrashLoopBackOff; the next pair's lead-in
+# then samples a sick pod as its "quiet baseline", which poisons that arm's
+# latency band and can read a still-unwinding previous fault as this pair's
+# outage. Nine minutes usually covers it. "Usually" is not a precondition.
+#
+# So: poll both arms until every workload is Ready and its restart counter has
+# stopped moving for `SETTLE_STABLE_SAMPLES` consecutive polls, then start.
+# Three properties that matter for the comparison:
+#
+#   1. It is SYMMETRIC. The gate waits for BOTH arms and starts neither until
+#      both are clean, so it cannot hand one arm a healthier starting state
+#      than the other -- which a per-arm readiness wait absolutely would.
+#   2. It is RECORDED, not assumed: `settled_s` / `settled_ok` go into
+#      pairs.csv per pair, so a reader can see which pairs started from a
+#      verified-clean cluster and which ran out of patience.
+#   3. It is a FLOOR, not just a cap: `SETTLE_STABLE_SAMPLES * poll` seconds
+#      must elapse with nothing moving before any pair starts.
+#
+# When the controller is live, the dead-zone argument comes back and the gate
+# is not sufficient on its own -- use `--gap` as well. Under DRY_RUN=True there
+# is no controller attached to this cluster at all (no decision log is being
+# written), so there is no dead zone to respect and the gate is the binding
+# constraint. That is a property of THIS run and is recorded as such.
+SETTLE_POLL_SECONDS = 10.0
+SETTLE_STABLE_SAMPLES = 3
+SETTLE_TIMEOUT_SECONDS = float(chaos.DEFAULT_GAP)
+
 
 @dataclass(frozen=True)
 class PairSpec:
@@ -184,6 +221,95 @@ def kubectl_probe(namespace: str, workload: str) -> dict:
     return dict(ready_replicas=ready, desired_replicas=len(tokens) or 0,
                 restarts_total=restarts,
                 probe_ok=(p.returncode == 0), probe_latency_ms=round(latency_ms, 1))
+
+
+def kubectl_arm_status(namespace: str, workloads: list[str]) -> dict[str, tuple]:
+    """`{workload: (ready, desired, restarts)}` for one namespace, ONE kubectl.
+
+    One call for the whole namespace rather than one per workload: the settle
+    gate runs between every pair, and at 600-900ms of binary startup per call
+    a per-workload loop turns a 30s gate into a 90s one on nothing but process
+    spawn. Shape mirrors `kubectl_probe` so a workload missing from the output
+    reads as (0, 0, 0) -- absent is not settled.
+    """
+    r = chaos._kubectl(
+        "get", "pods", "-n", namespace, "-o",
+        "jsonpath={range .items[*]}{.metadata.labels.app}="
+        "{.status.containerStatuses[*].ready}:"
+        "{.status.containerStatuses[*].restartCount} {end}", timeout=20)
+    out = {w: (0, 0, 0) for w in workloads}
+    for tok in r.stdout.split():
+        if "=" not in tok or ":" not in tok:
+            continue
+        app, rest = tok.split("=", 1)
+        if app not in out:
+            continue
+        ready_s, _, restart_s = rest.partition(":")
+        ready = sum(1 for x in ready_s.split() if x == "true") if ready_s else 0
+        desired = len(ready_s.split()) if ready_s else 0
+        restarts = sum(int(x) for x in restart_s.split() if x.isdigit())
+        prev = out[app]
+        out[app] = (prev[0] + ready, prev[1] + desired, prev[2] + restarts)
+    return out
+
+
+def wait_settled(workloads: list[str], status_fn=kubectl_arm_status,
+                 poll: float = SETTLE_POLL_SECONDS,
+                 stable_samples: int = SETTLE_STABLE_SAMPLES,
+                 timeout: float = SETTLE_TIMEOUT_SECONDS,
+                 sleep=time.sleep, clock=time.monotonic) -> dict:
+    """Block until BOTH arms are Ready and restart-stable, or `timeout`.
+
+    "Stable" means `stable_samples` consecutive polls in which every workload
+    in every arm is Ready AND no restart counter moved. A restart counter that
+    is still ticking is the signature of a CrashLoopBackOff left over from the
+    previous pair, and it is the one thing that most reliably contaminates the
+    next pair's baseline.
+
+    Returns `{settled, waited_s, polls, detail}` rather than raising. A gate
+    that timed out is information about that pair, not a reason to lose the
+    pair -- `eval/recovery.py` can exclude it, and a gate that killed the
+    campaign at 3am would cost far more than the pair is worth.
+    """
+    t0 = clock()
+    streak = 0
+    polls = 0
+    prev: dict[str, dict] | None = None
+    detail = "no poll completed"
+    while True:
+        polls += 1
+        try:
+            now = {arm: status_fn(ARM_NAMESPACE[arm], workloads) for arm in ARMS}
+        except Exception as exc:                      # noqa: BLE001
+            now, streak = None, 0
+            detail = f"{type(exc).__name__}: {exc}"
+        if now is not None:
+            unready = [f"{arm}/{w}={v[0]}/{v[1]}"
+                       for arm in ARMS for w, v in now[arm].items()
+                       if v[0] < 1 or v[0] != v[1]]
+            moved = [] if prev is None else [
+                f"{arm}/{w}" for arm in ARMS for w in workloads
+                if now[arm].get(w, (0, 0, 0))[2] != prev[arm].get(w, (0, 0, 0))[2]]
+            if unready:
+                streak, detail = 0, "not ready: " + " ".join(unready)
+            elif prev is None:
+                # First poll can show Ready but says nothing about whether the
+                # restart counter is still moving -- that needs two readings.
+                streak, detail = 0, "ready; need a second reading for restart stability"
+            elif moved:
+                streak, detail = 0, "restarts still moving: " + " ".join(moved)
+            else:
+                streak += 1
+                detail = f"ready and restart-stable for {streak}/{stable_samples} polls"
+            prev = now
+        waited = clock() - t0
+        if streak >= stable_samples:
+            return dict(settled=True, waited_s=round(waited, 1), polls=polls,
+                        detail=detail)
+        if waited >= timeout:
+            return dict(settled=False, waited_s=round(waited, 1), polls=polls,
+                        detail=f"timed out after {timeout:.0f}s -- {detail}")
+        sleep(poll)
 
 
 # --- simultaneous injection -------------------------------------------------
@@ -326,8 +452,49 @@ class HealthSampler:
 
 # --- the schedule -----------------------------------------------------------
 
+def _round_cells(faults: list[str], wls: list[str],
+                 order: str) -> list[tuple[str, str, str]]:
+    """The (fault, pattern, workload) cells of ONE round, in execution order.
+
+    Two orders, and the choice is about what a HALF-FINISHED campaign is worth,
+    which for an overnight run is the case that actually happens:
+
+      "nested"  fault-major within each workload, the original order. Round 1
+                finishes everything on redis before touching nginx, so a
+                campaign cut off at 40% has three fault types on one workload
+                and nothing on the other two -- every number workload-confounded.
+
+      "rotate"  one cell per fault type, cycling workload fastest. After four
+                pairs there is one of every fault type; after twelve there are
+                three of each, spread across all three workloads. Every prefix
+                of the campaign is a balanced campaign, so being interrupted
+                costs precision rather than costing whole rows.
+
+    Rotate also happens to put a restart-causing MEMORY_LEAK next to a
+    non-restarting CPU_HOG rather than back-to-back with another MEMORY_LEAK,
+    which is the adjacency the settle gate has to work hardest on.
+    """
+    if order == "nested":
+        return [(f, p, w) for w in wls for f in faults
+                for p in (["none"] if f == "POD_KILL" else chaos.PATTERNS)]
+    if order != "rotate":
+        raise ValueError(f"unknown order {order!r}; expected 'nested' or 'rotate'")
+    # workload cycles fastest, so the first len(wls) cells of each fault type
+    # already cover every workload.
+    per_fault = {f: [(f, p, w) for p in (["none"] if f == "POD_KILL" else chaos.PATTERNS)
+                     for w in wls]
+                 for f in faults}
+    cells: list[tuple[str, str, str]] = []
+    for i in range(max((len(v) for v in per_fault.values()), default=0)):
+        for f in faults:
+            if i < len(per_fault[f]):
+                cells.append(per_fault[f][i])
+    return cells
+
+
 def paired_plan(rounds: int = 1, fault_types: list[str] | None = None,
-                workloads: list[str] | None = None) -> list[PairSpec]:
+                workloads: list[str] | None = None, order: str = "nested",
+                duration_s: int = chaos.DEFAULT_DURATION) -> list[PairSpec]:
     """The campaign as an ordered list of pairs, each with a stable `pair_id`.
 
     Deterministic so a crashed campaign resumes instead of renumbering, exactly
@@ -335,35 +502,49 @@ def paired_plan(rounds: int = 1, fault_types: list[str] | None = None,
     rather than the two `chaos.py` samples: with only four fault types and two
     of them unable to move (see `eval/recovery.py` on the policy table), the
     cheap instant-failure floor is worth having on all three.
+
+    `pair_id` deliberately does NOT encode `order` or `duration_s`. The id is
+    the resume key, so the same cell must keep the same name whichever order
+    produced it -- otherwise changing the order silently re-runs the whole
+    campaign instead of continuing it.
     """
     faults = fault_types or [*chaos.FAULTS, "POD_KILL"]
     wls = workloads or chaos.WORKLOADS
     specs: list[PairSpec] = []
     seen: dict[tuple, int] = {}
     for _ in range(rounds):
-        for workload in wls:
-            for fault in faults:
-                patterns = ["none"] if fault == "POD_KILL" else chaos.PATTERNS
-                for pattern in patterns:
-                    key = (fault, pattern, workload)
-                    seen[key] = seen.get(key, 0) + 1
-                    specs.append(PairSpec(
-                        pair_id=f"{fault}_{pattern}_{workload}_{seen[key]:03d}",
-                        fault_type=fault, workload=workload, pattern=pattern,
-                        duration_s=chaos.DEFAULT_DURATION))
+        for fault, pattern, workload in _round_cells(faults, wls, order):
+            key = (fault, pattern, workload)
+            seen[key] = seen.get(key, 0) + 1
+            specs.append(PairSpec(
+                pair_id=f"{fault}_{pattern}_{workload}_{seen[key]:03d}",
+                fault_type=fault, workload=workload, pattern=pattern,
+                duration_s=duration_s))
     return specs
 
 
 def pair_rows(spec: PairSpec, results: dict[str, ArmResult],
-              load_attested: bool) -> list[dict]:
-    """Two rows per pair, one per arm -- the shape `eval/recovery.py` expects."""
+              load_attested: bool, settle: dict | None = None,
+              trail_s: float = TRAIL_SECONDS) -> list[dict]:
+    """Two rows per pair, one per arm -- the shape `eval/recovery.py` expects.
+
+    `settled_ok` / `settled_s` and `trail_s` are per-pair facts about HOW the
+    pair was run, recorded beside the measurement rather than described once in
+    a README. `trail_s` in particular is the censoring horizon: a row that says
+    NOT_RECOVERED means "still down after trail_s", and that sentence is
+    unreadable without the number. Both arms share these values by
+    construction -- one gate, one trailing window, both arms inside it.
+    """
     skew = skew_seconds(results)
+    settle = settle or {}
     return [dict(pair_id=spec.pair_id, arm=r.arm, namespace=r.namespace,
                  fault_type=spec.fault_type, workload=spec.workload,
                  pattern=spec.pattern, duration_s=spec.duration_s,
                  start_ts=r.start_ts, end_ts=r.end_ts, failure_ts=r.failure_ts,
                  restarts_delta=r.restarts_delta, inject_ok=r.inject_ok,
-                 skew_s=skew, load_attested=load_attested)
+                 skew_s=skew, load_attested=load_attested,
+                 settled_ok=settle.get("settled"), settled_s=settle.get("waited_s"),
+                 trail_s=trail_s)
             for r in (results[a] for a in ARMS)]
 
 
@@ -377,52 +558,83 @@ def _append(path: Path, rows: list[dict], columns: list[str]) -> None:
 
 def run_pair(spec: PairSpec, load_attested: bool, outdir: str = OUTDIR,
              injector=kubectl_injector, probe_fn=kubectl_probe,
-             sleep=time.sleep) -> dict[str, ArmResult]:
+             sleep=time.sleep, settle: dict | None = None,
+             lead_s: float = LEAD_SECONDS,
+             trail_s: float = TRAIL_SECONDS) -> dict[str, ArmResult]:
     """One pair end to end: lead-in baseline, simultaneous injection, trailing
     recovery window, then flush both files.
 
     The lead-in is not padding -- `eval.recovery.latency_band()` needs quiet
     pre-injection samples on each arm to set that arm's own degradation band,
     and without it every CPU_HOG/DISK_STRESS row comes back NO_DATA.
+
+    `settle` is the result of the gate the CALLER already ran, passed in only
+    so it lands in the row. The gate is not run here on purpose: it belongs
+    before the lead-in, and running it inside the pair would put a
+    variable-length cluster wait inside the window whose length the censoring
+    definition depends on.
     """
     outdir_p = Path(outdir)
     sampler = HealthSampler(workloads=[spec.workload])
     sampler.probe_fn = probe_fn
     sampler.start()
     try:
-        sleep(LEAD_SECONDS)                      # per-arm baseline for the band
+        sleep(lead_s)                            # per-arm baseline for the band
         results = inject_both(spec, injector=injector)
-        sleep(TRAIL_SECONDS)                     # watch for recovery
+        sleep(trail_s)                           # watch for recovery
     finally:
         sampler.stop()
 
-    _append(outdir_p / "pairs.csv", pair_rows(spec, results, load_attested), PAIRS_COLUMNS)
+    _append(outdir_p / "pairs.csv",
+            pair_rows(spec, results, load_attested, settle, trail_s), PAIRS_COLUMNS)
     _append(outdir_p / "health.csv", sampler.rows, HEALTH_COLUMNS)
     skew = skew_seconds(results)
     print(f"  {spec.pair_id:34} skew={skew if skew is None else round(skew, 2)}s  "
           + "  ".join(f"{a}:{'ok' if results[a].inject_ok else results[a].error}"
-                      for a in ARMS))
+                      for a in ARMS), flush=True)
     return results
 
 
 def campaign(rounds: int = 1, fault_types: list[str] | None = None,
              outdir: str = OUTDIR, gap: int = chaos.DEFAULT_GAP,
              load_attested: bool = False, injector=kubectl_injector,
-             probe_fn=kubectl_probe, sleep=time.sleep) -> None:
+             probe_fn=kubectl_probe, sleep=time.sleep, order: str = "nested",
+             duration_s: int = chaos.DEFAULT_DURATION, settle_fn=None,
+             lead_s: float = LEAD_SECONDS,
+             trail_s: float = TRAIL_SECONDS) -> None:
+    """Run the plan, appending after every pair so an interrupted run keeps
+    everything it measured.
+
+    `settle_fn` defaults to None -- NO gate -- so the offline tests drive the
+    whole loop with fakes and no cluster. The CLI passes the real
+    `wait_settled`. The gate runs BEFORE each pair rather than after, so the
+    very first pair of a resumed campaign is gated too: a campaign resumed
+    minutes after one died mid-MEMORY_LEAK is exactly the case where the
+    cluster is still unwinding and nothing has waited for it.
+    """
     done: set[str] = set()
     pairs_p = Path(outdir) / "pairs.csv"
     if pairs_p.exists():
         done = set(pd.read_csv(pairs_p)["pair_id"])
         print(f"resuming -- {len(done)} pairs already in {pairs_p}, skipping those\n")
 
-    plan = paired_plan(rounds, fault_types)
-    print(f"{len(plan)} pairs x 2 arms, gap {gap}s "
-          f"(= ml.detector.POST_RESTART_SUPPRESS_TICKS + margin)\n")
-    for spec in plan:
-        if spec.pair_id in done:
-            print(f"  skip {spec.pair_id} (done)")
-            continue
-        run_pair(spec, load_attested, outdir, injector, probe_fn, sleep)
+    plan = paired_plan(rounds, fault_types, order=order, duration_s=duration_s)
+    todo = [s for s in plan if s.pair_id not in done]
+    print(f"{len(plan)} pairs x 2 arms ({len(todo)} to run), order={order}, "
+          f"gap {gap}s, settle-gate {'on' if settle_fn else 'off'}, "
+          f"lead {lead_s:.0f}s, trail {trail_s:.0f}s\n", flush=True)
+    for n, spec in enumerate(todo, 1):
+        settle = settle_fn([spec.workload]) if settle_fn else None
+        if settle is not None and not settle["settled"]:
+            # Recorded, not fatal. A pair that started from an unsettled
+            # cluster is still a pair; it is `settled_ok=False` in pairs.csv so
+            # a reader can drop it, which is strictly better than a blind sleep
+            # that never knew either way.
+            print(f"  [warn] settle gate: {settle['detail']}", flush=True)
+        print(f"  [{n}/{len(todo)}] {spec.pair_id}"
+              + (f"  settled in {settle['waited_s']}s" if settle else ""), flush=True)
+        run_pair(spec, load_attested, outdir, injector, probe_fn, sleep,
+                 settle=settle, lead_s=lead_s, trail_s=trail_s)
         sleep(gap)
 
 
@@ -497,6 +709,23 @@ def main() -> None:
     ap.add_argument("--gap", type=int, default=chaos.DEFAULT_GAP)
     ap.add_argument("--duration", type=int, default=chaos.DEFAULT_DURATION)
     ap.add_argument("--outdir", default=OUTDIR)
+    ap.add_argument("--order", choices=["nested", "rotate"], default="nested",
+                    help="rotate: one pair per fault type in turn, so every prefix of "
+                         "an interrupted campaign is still balanced across fault types "
+                         "and workloads. nested: the original workload-major order.")
+    ap.add_argument("--settle-gate", action="store_true",
+                    help="before each pair, poll BOTH arms until every workload is Ready "
+                         "and its restart counter has stopped moving. Recorded per pair "
+                         "as settled_ok/settled_s. Replaces the blind gap's implicit hope "
+                         "that the previous fault had finished unwinding -- but NOT its "
+                         "detector-dead-zone purpose, so keep --gap when the controller "
+                         "is live.")
+    ap.add_argument("--lead", type=float, default=LEAD_SECONDS,
+                    help="quiet seconds before injection; sets the per-arm latency band")
+    ap.add_argument("--trail", type=float, default=TRAIL_SECONDS,
+                    help="seconds watched after injection. This is the CENSORING HORIZON: "
+                         "a recovery slower than this reads as NOT_RECOVERED, not as a "
+                         "number. Recorded per pair as trail_s.")
     ap.add_argument("--load-attested", action="store_true",
                     help="you have confirmed identical load is running against BOTH "
                          "namespaces (collect/load/run-load.sh). Recorded per arm-row.")
@@ -531,11 +760,16 @@ def main() -> None:
                                                          else "constant")
         spec = PairSpec(pair_id=f"{fault}_{pattern}_{workload}_001", fault_type=fault,
                         workload=workload, pattern=pattern, duration_s=args.duration)
-        run_pair(spec, args.load_attested, args.outdir)
+        settle = wait_settled([workload]) if args.settle_gate else None
+        run_pair(spec, args.load_attested, args.outdir, settle=settle,
+                 lead_s=args.lead, trail_s=args.trail)
     elif args.campaign:
         campaign(args.rounds,
                  args.fault_types.split(",") if args.fault_types else None,
-                 args.outdir, args.gap, args.load_attested)
+                 args.outdir, args.gap, args.load_attested,
+                 order=args.order, duration_s=args.duration,
+                 settle_fn=wait_settled if args.settle_gate else None,
+                 lead_s=args.lead, trail_s=args.trail)
         print(f"\nnow measure it:  python -m eval.recovery --indir {args.outdir}")
     else:
         ap.error("pass --preflight, --campaign or --one FAULT WORKLOAD [PATTERN]")

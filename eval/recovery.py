@@ -162,9 +162,14 @@ HEALTH_SAMPLE_SECONDS = 5.0
 # so the band self-calibrates rather than trusting the interval we asked for.
 TIE_BAND_SECONDS = HEALTH_SAMPLE_SECONDS
 
+# `settled_ok`/`settled_s`/`trail_s` are appended at the END and every reader
+# below goes through `.get()`, so a pairs.csv written before they existed still
+# loads -- which matters, because the first live two-arm run predates them and
+# is the only other data this module has ever seen.
 PAIRS_COLUMNS = ["pair_id", "arm", "namespace", "fault_type", "workload", "pattern",
                  "duration_s", "start_ts", "end_ts", "failure_ts", "restarts_delta",
-                 "inject_ok", "skew_s", "load_attested"]
+                 "inject_ok", "skew_s", "load_attested",
+                 "settled_ok", "settled_s", "trail_s"]
 HEALTH_COLUMNS = ["ts", "arm", "workload", "ready_replicas", "desired_replicas",
                   "restarts_total", "probe_ok", "probe_latency_ms"]
 
@@ -537,6 +542,153 @@ def paired_delta_table(measured: pd.DataFrame,
     return pd.DataFrame(rows).sort_values("fault_type").reset_index(drop=True)
 
 
+# --- what a SHADOW-MODE campaign can legitimately measure -------------------
+#
+# With `control/controller.py` DRY_RUN=True the treatment arm takes no action:
+# `execute_action()` returns "dry-run" before touching the API. So the two
+# namespaces are not treatment-and-control, they are stock Kubernetes and stock
+# Kubernetes. `attest_treatment_arm_live()` already refuses to publish that as
+# a comparison, and the two functions below are what is left that is TRUE.
+#
+# They are not a consolation prize. They are the two things the comparison
+# needs before it can exist:
+#
+#   stock_baseline_table()  The number Prodrome has to beat. Pooling the arms
+#                           is not a trick to inflate n -- it is only valid
+#                           BECAUSE both arms are stock Kubernetes, which is
+#                           exactly the condition that makes the comparison
+#                           invalid. The same fact buys one thing and forbids
+#                           the other, so the function demands the caller state
+#                           it (`shadow_mode=True`) rather than inferring it.
+#
+#   shadow_noise_floor()    The true per-pair delta here is ZERO by
+#                           construction. Any magnitude the harness reports is
+#                           therefore measurement noise, and its upper tail is
+#                           the smallest effect a future live run could claim
+#                           without being indistinguishable from this one.
+#
+# Neither is a counterfactual. "What Prodrome WOULD have done" needs a shadow
+# decision log (SETUP.md 7) and there is none on disk; see `attest_counterfactual_available`.
+
+def _spread(vals: pd.Series) -> dict:
+    """Median AND spread, always together.
+
+    A median with no spread beside it is the single most common way a result
+    with n=3 gets quoted as if it had n=300. Returned as its own dict so every
+    table below reports the same five numbers in the same order.
+    """
+    v = pd.to_numeric(vals, errors="coerce").dropna()
+    if not len(v):
+        return dict(n=0, min_s=None, p25_s=None, median_s=None, p75_s=None,
+                    p90_s=None, max_s=None, iqr_s=None)
+    return dict(n=int(len(v)), min_s=round(float(v.min()), 1),
+                p25_s=round(float(v.quantile(0.25)), 1),
+                median_s=round(float(v.median()), 1),
+                p75_s=round(float(v.quantile(0.75)), 1),
+                p90_s=round(float(v.quantile(0.90)), 1),
+                max_s=round(float(v.max()), 1),
+                iqr_s=round(float(v.quantile(0.75) - v.quantile(0.25)), 1))
+
+
+def stock_baseline_table(measured: pd.DataFrame, shadow_mode: bool) -> pd.DataFrame:
+    """Stock-Kubernetes recovery per fault type, pooled across both arms.
+
+    THE PRECONDITION IS THE WHOLE FUNCTION. `shadow_mode` must be True, meaning
+    `attest_treatment_arm_live()` FAILED and the treatment arm demonstrably did
+    nothing. Under that condition both namespaces are stock Kubernetes running
+    byte-identical manifests, so an arm label carries no information and the two
+    columns are two draws from one distribution. Pool them and n doubles.
+
+    Call it with `shadow_mode=False` and it raises, because the moment Prodrome
+    is actually acting, pooling the arms averages the treatment INTO the
+    baseline and destroys the only thing the baseline is for.
+
+    `censored_rows` is reported beside every median and is not optional: a row
+    censored at the trailing horizon is a recovery SLOWER than every number in
+    the median, and dropping it silently biases the baseline fast -- which
+    makes the bar Prodrome must clear lower than it really is.
+    """
+    if not shadow_mode:
+        raise ValueError(
+            "stock_baseline_table() pools the treatment and control arms, which is "
+            "only valid while the treatment arm is inert (DRY_RUN=True / "
+            "attest_treatment_arm_live() failing). With Prodrome live, pooling "
+            "averages the treatment into its own baseline. Use "
+            "per_fault_arm_table() instead.")
+    rows = []
+    for fault, g in measured.groupby("fault_type", dropna=False):
+        kind = RECOVERY_KIND.get(fault)
+        col = "recovery_seconds" if kind == OUTAGE else "degradation_seconds"
+        censored = int((g["outcome"] == NOT_RECOVERED).sum()
+                       + (g["outcome"] == STILL_DEGRADED).sum())
+        rows.append(dict(
+            fault_type=fault, kind=kind, quantity=col,
+            pairs=int(g["pair_id"].nunique()), arm_rows=int(len(g)),
+            arms=int(g["arm"].nunique()),
+            n_measured=int(g[col].notna().sum()),
+            censored_rows=censored,
+            no_event_rows=int((g["outcome"] == NO_OUTAGE).sum()
+                              + (g["outcome"] == NO_DEGRADATION).sum()),
+            no_data_rows=int((g["outcome"] == NO_DATA).sum()),
+            **{k: v for k, v in _spread(g[col]).items() if k != "n"},
+        ))
+    return pd.DataFrame(rows).sort_values("fault_type").reset_index(drop=True)
+
+
+def shadow_noise_floor(measured: pd.DataFrame, tie_band: float) -> pd.DataFrame:
+    """How big a difference this harness invents when there is none.
+
+    In shadow mode the true treatment-minus-control delta is zero for every
+    pair: the arms are the same system. So every non-zero delta measured here
+    is the harness's own noise -- OOMKill timing, kubelet scheduling, kubectl
+    round-trip jitter, the 5s sampling grid.
+
+    `min_detectable_effect_s` is the p90 of |delta|. It is the number that
+    makes a future live result readable: a live campaign reporting a median
+    advantage smaller than this has reported nothing, because this campaign
+    produced differences that big with Prodrome switched OFF.
+
+    This is also the correct reading of the inherited single pair (MEMORY_LEAK,
+    control 14.4s vs prodrome 39.8s). That 25s gap was NOT Prodrome losing --
+    Prodrome was not running. It was one draw from this distribution, and the
+    only honest question is whether 25s is ordinary here. These rows answer it.
+    """
+    rows = []
+    for fault, g in measured.groupby("fault_type", dropna=False):
+        kind = RECOVERY_KIND.get(fault)
+        col = "recovery_seconds" if kind == OUTAGE else "degradation_seconds"
+        wide = g.pivot_table(index="pair_id", columns="arm", values=col,
+                             aggfunc="first", dropna=False)
+        skew_ok = g.groupby("pair_id")["skew_ok"].all()
+        for arm in ARMS:
+            if arm not in wide.columns:
+                wide[arm] = pd.NA
+        usable = (wide[TREATMENT_ARM].notna() & wide[CONTROL_ARM].notna()
+                  & skew_ok.reindex(wide.index).fillna(False))
+        d = (pd.to_numeric(wide.loc[usable, TREATMENT_ARM], errors="coerce")
+             - pd.to_numeric(wide.loc[usable, CONTROL_ARM], errors="coerce"))
+        a = d.abs()
+        rows.append(dict(
+            fault_type=fault, kind=kind, pairs=int(len(wide)),
+            pairs_in_delta=int(usable.sum()),
+            median_delta_s=round(float(d.median()), 1) if len(d) else None,
+            median_abs_delta_s=round(float(a.median()), 1) if len(a) else None,
+            p90_abs_delta_s=round(float(a.quantile(0.90)), 1) if len(a) else None,
+            max_abs_delta_s=round(float(a.max()), 1) if len(a) else None,
+            # The bar. p90 of a difference that is zero in truth.
+            min_detectable_effect_s=(round(max(float(a.quantile(0.90)), tie_band), 1)
+                                     if len(a) else round(tie_band, 1)),
+            # Under a true zero these should be roughly equal. A lopsided split
+            # is evidence of an ASYMMETRY in the harness -- one arm
+            # systematically measured differently -- not of a treatment effect,
+            # because there is no treatment.
+            nominally_prodrome_faster=int((d < -tie_band).sum()) if len(d) else 0,
+            nominally_control_faster=int((d > tie_band).sum()) if len(d) else 0,
+            tied=int((a <= tie_band).sum()) if len(a) else 0,
+        ))
+    return pd.DataFrame(rows).sort_values("fault_type").reset_index(drop=True)
+
+
 # --- attestation: is this experiment even capable of a comparison? ---------
 
 @dataclass(frozen=True)
@@ -658,6 +810,46 @@ def attest_treatment_arm_live(decisions: pd.DataFrame | None,
     return Attestation("treatment-arm-live", True, "DRY_RUN=False and no log read yet")
 
 
+def attest_counterfactual_available(decisions: pd.DataFrame | None,
+                                    decisions_path: str | Path | None = None) -> Attestation:
+    """Can we even say what Prodrome WOULD have done?
+
+    Shadow mode's one consolation is supposed to be the counterfactual: the
+    controller still decides and still logs, so `data/decisions/log.csv` tells
+    you which action it chose and at what tick, and that can be reported --
+    clearly labelled -- as "Prodrome would have restarted at t+22s".
+
+    That requires the controller to have been RUNNING against the cluster
+    during the campaign. A shadow controller that was never started writes no
+    log, and then there is no counterfactual either -- only the stock-Kubernetes
+    baseline. This attestation exists so that absence is stated in the report
+    rather than quietly becoming an omission, because the gap between "Prodrome
+    decided not to act" and "Prodrome was never asked" is the whole difference
+    between a counterfactual and a blank.
+
+    Never ok. The best case is `ok=True` meaning a log exists to read, which is
+    still not a measured recovery and must never be rendered as one.
+    """
+    where = str(decisions_path) if decisions_path else "data/decisions/log.csv"
+    if decisions is None or not len(decisions):
+        return Attestation(
+            "counterfactual-available", False,
+            f"no decision log at {where}: the controller was not running against this "
+            "cluster during the campaign, so there is NO counterfactual -- we cannot "
+            "say what Prodrome would have done or when. Only the stock-Kubernetes "
+            "baseline below is measured.")
+    cols = set(decisions.columns)
+    missing = {"ts", "action"} - cols
+    if missing:
+        return Attestation("counterfactual-available", False,
+                           f"decision log at {where} lacks {sorted(missing)}; cannot "
+                           "place a would-have-acted instant on the timeline")
+    return Attestation("counterfactual-available", True,
+                       f"{len(decisions)} decision rows at {where} -- a counterfactual "
+                       "timeline can be built. It is NOT a measured recovery and must "
+                       "be labelled as a counterfactual wherever it is quoted.")
+
+
 def attest_pair_skew(pairs: pd.DataFrame,
                      tolerance: float = SKEW_TOLERANCE_SECONDS) -> Attestation:
     """Both arms took the fault at the same moment, under the same load."""
@@ -714,18 +906,46 @@ def publishable(attestations: list[Attestation]) -> bool:
 
 
 def render(per_fault: pd.DataFrame, deltas: pd.DataFrame,
-           attestations: list[Attestation]) -> str:
+           attestations: list[Attestation],
+           notes: list[Attestation] | None = None,
+           baseline: pd.DataFrame | None = None,
+           noise: pd.DataFrame | None = None) -> str:
     """The report, with its own caveats attached. Ground rule 7: say what it
     cannot do, in the report itself -- not in a README somebody will not open
-    next to the number they are quoting."""
+    next to the number they are quoting.
+
+    `notes` are attestations that are reported but deliberately do NOT feed
+    `publishable()` -- the counterfactual one, specifically: a live campaign
+    with real measurements does not need a counterfactual to be publishable,
+    so letting its absence veto publication would be wrong. `baseline` and
+    `noise` are the shadow-mode tables, rendered only when they were computed.
+    """
     ok = publishable(attestations)
     lines = ["=== control-arm attestation ==="]
     for a in attestations:
         lines.append(f"  [{'ok ' if a.ok else 'FAIL'}] {a.name}: {a.detail}")
+    for a in (notes or []):
+        lines.append(f"  [{'ok ' if a.ok else 'n/a '}] {a.name}: {a.detail}")
     lines.append("")
     lines.append("PUBLISHABLE AS A CONTROL-ARM COMPARISON: "
                  + ("yes" if ok else "NO -- the numbers below describe this run, "
                                      "they do not compare Prodrome to stock Kubernetes"))
+    if baseline is not None and len(baseline):
+        lines += ["",
+                  "=== STOCK-KUBERNETES BASELINE (both arms pooled; shadow mode only) ===",
+                  "  Valid BECAUSE the treatment arm is inert: both namespaces are stock",
+                  "  Kubernetes on byte-identical manifests, so the arm label carries no",
+                  "  information and the two columns are two draws from one distribution.",
+                  "  This is the bar any future Prodrome result has to clear.",
+                  baseline.to_string(index=False)]
+    if noise is not None and len(noise):
+        lines += ["",
+                  "=== HARNESS NOISE FLOOR (true delta is ZERO by construction) ===",
+                  "  Prodrome took no action, so every pair's real treatment-minus-control",
+                  "  difference is exactly 0s. What appears below is this harness measuring",
+                  "  the same system twice. min_detectable_effect_s is the p90 of |delta|:",
+                  "  a live run claiming an advantage smaller than that has claimed nothing.",
+                  noise.to_string(index=False)]
     lines += ["", "=== recovery per fault type, per arm (ground rule 6) ===",
               per_fault.to_string(index=False) if len(per_fault) else "  (no pairs measured)",
               "", "=== paired delta, treatment minus control (negative = Prodrome faster) ===",
@@ -788,14 +1008,30 @@ def main() -> None:
           f"this are reported as ties, not wins\n")
     atts = attest(pairs=pairs, decisions=decisions,
                   controller_namespace=controller.NAMESPACE, dry_run=controller.DRY_RUN)
+    notes = [attest_counterfactual_available(decisions, dpath)]
 
-    print(render(per_fault, deltas, atts))
+    # Shadow mode is exactly the condition under which the arms may be pooled
+    # and under which the measured delta has a known true value of zero. Keyed
+    # off the attestation that already decides it rather than off DRY_RUN
+    # directly, so the two can never disagree.
+    live = next(a for a in atts if a.name == "treatment-arm-live")
+    baseline = noise = None
+    if not live.ok:
+        baseline = stock_baseline_table(measured, shadow_mode=True)
+        noise = shadow_noise_floor(measured, tie_band=resolution)
+
+    print(render(per_fault, deltas, atts, notes, baseline, noise))
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     per_fault.to_csv(args.out, index=False)
     measured.to_csv(indir / "measured.csv", index=False)
     deltas.to_csv(indir / "paired-deltas.csv", index=False)
-    print(f"\nwrote {args.out}, {indir}/measured.csv, {indir}/paired-deltas.csv")
+    written = [args.out, f"{indir}/measured.csv", f"{indir}/paired-deltas.csv"]
+    if baseline is not None:
+        baseline.to_csv(indir / "stock-baseline.csv", index=False)
+        noise.to_csv(indir / "noise-floor.csv", index=False)
+        written += [f"{indir}/stock-baseline.csv", f"{indir}/noise-floor.csv"]
+    print("\nwrote " + ", ".join(written))
 
 
 if __name__ == "__main__":

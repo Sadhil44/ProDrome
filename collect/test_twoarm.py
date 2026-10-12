@@ -351,6 +351,184 @@ def test_null_run_is_the_only_other_way_past_the_load_gate():
     assert not att.ok
 
 
+# --- the settle gate --------------------------------------------------------
+#
+# The gate replaces the blind inter-pair sleep's IMPLICIT half -- "whatever the
+# last pair broke has probably finished unbreaking by now" -- with a checked
+# precondition. It does NOT replace the explicit half (the detector dead zone),
+# and `test_gap_is_tied_to_the_detector_dead_zone_not_hardcoded` above still
+# guards that. These tests cover the properties that make the gate safe to use
+# in a comparison at all.
+
+class FakeStatus:
+    """Scripted `{workload: (ready, desired, restarts)}` per arm, per poll."""
+
+    def __init__(self, script: list[dict[str, dict[str, tuple]]]):
+        self.script = script
+        self.polls = 0
+        self._seen: set[str] = set()
+
+    def __call__(self, namespace: str, workloads: list[str]) -> dict[str, tuple]:
+        self._seen.add(namespace)
+        # Advance one step only once BOTH arms have been read for this poll.
+        step = self.script[min(self.polls, len(self.script) - 1)]
+        if self._seen >= {twoarm.ARM_NAMESPACE[a] for a in ARMS}:
+            self.polls += 1
+            self._seen = set()
+        return step[namespace]
+
+
+def _ok(restarts: int = 0) -> dict[str, tuple]:
+    return {"redis": (1, 1, restarts)}
+
+
+def test_settle_gate_waits_for_both_arms_not_just_one():
+    """The gate must be SYMMETRIC. A gate that started as soon as the treatment
+    arm was healthy would hand that arm a clean pod while the control arm was
+    still unwinding the previous fault -- a recovery-time difference caused
+    entirely by the scheduler, which is exactly the bias this harness exists to
+    avoid."""
+    prodrome_ns, control_ns = twoarm.ARM_NAMESPACE[TREATMENT_ARM], twoarm.ARM_NAMESPACE[CONTROL_ARM]
+    script = [
+        # prodrome healthy from the start; control still down for two polls.
+        {prodrome_ns: _ok(), control_ns: {"redis": (0, 1, 3)}},
+        {prodrome_ns: _ok(), control_ns: {"redis": (0, 1, 3)}},
+    ] + [{prodrome_ns: _ok(), control_ns: _ok(3)}] * 6
+    st = FakeStatus(script)
+    res = twoarm.wait_settled(["redis"], status_fn=st, poll=0, stable_samples=3,
+                              timeout=1e6, sleep=lambda _s: None,
+                              clock=lambda: 0.0)
+    assert res["settled"] is True
+    # Two polls lost to the control arm, one to establishing restart stability,
+    # then three clean -- it did not start the moment prodrome went green.
+    assert res["polls"] >= 5
+
+
+def test_settle_gate_requires_restart_counter_to_stop_moving():
+    """Ready is not settled. A pod in CrashLoopBackOff is Ready between
+    crashes, so readiness alone lets a still-crashing workload through and its
+    next crash lands inside the following pair's baseline."""
+    ns_t, ns_c = twoarm.ARM_NAMESPACE[TREATMENT_ARM], twoarm.ARM_NAMESPACE[CONTROL_ARM]
+    # Ready the whole time, but the restart counter keeps ticking for 3 polls.
+    script = [{ns_t: _ok(r), ns_c: _ok(r)} for r in (1, 2, 3)] + \
+             [{ns_t: _ok(3), ns_c: _ok(3)}] * 6
+    st = FakeStatus(script)
+    res = twoarm.wait_settled(["redis"], status_fn=st, poll=0, stable_samples=3,
+                              timeout=1e6, sleep=lambda _s: None, clock=lambda: 0.0)
+    assert res["settled"] is True
+    assert res["polls"] >= 6          # the ticking polls did not count
+
+
+def test_settle_gate_needs_two_readings_before_it_can_claim_stability():
+    """One poll shows Ready but says nothing about whether the restart counter
+    is still moving -- that needs a second reading. Counting the first poll
+    toward the streak would let a crashing pod through on a lucky sample."""
+    ns_t, ns_c = twoarm.ARM_NAMESPACE[TREATMENT_ARM], twoarm.ARM_NAMESPACE[CONTROL_ARM]
+    st = FakeStatus([{ns_t: _ok(), ns_c: _ok()}])
+    res = twoarm.wait_settled(["redis"], status_fn=st, poll=0, stable_samples=3,
+                              timeout=1e6, sleep=lambda _s: None, clock=lambda: 0.0)
+    assert res["settled"] is True
+    assert res["polls"] == 4          # 1 to prime + 3 stable, never 3
+
+
+def test_settle_gate_times_out_without_killing_the_campaign():
+    """A gate that raised at 3am would cost far more than the pair is worth.
+    The timeout is RECORDED (settled_ok=False) so eval/ can drop the pair --
+    which is strictly better than a blind sleep that never knew either way."""
+    ns_t, ns_c = twoarm.ARM_NAMESPACE[TREATMENT_ARM], twoarm.ARM_NAMESPACE[CONTROL_ARM]
+    st = FakeStatus([{ns_t: {"redis": (0, 1, 0)}, ns_c: _ok()}])
+    clock = iter([0.0, 10.0, 20.0, 30.0, 40.0, 50.0] + [999.0] * 20)
+    res = twoarm.wait_settled(["redis"], status_fn=st, poll=0, stable_samples=3,
+                              timeout=60.0, sleep=lambda _s: None,
+                              clock=lambda: next(clock))
+    assert res["settled"] is False
+    assert "timed out" in res["detail"] and "not ready" in res["detail"]
+
+
+def test_a_throwing_status_call_resets_the_streak_rather_than_crashing():
+    """An API server that stops answering mid-gate is a reason to keep waiting,
+    not a reason to lose the night's campaign."""
+    ns_t, ns_c = twoarm.ARM_NAMESPACE[TREATMENT_ARM], twoarm.ARM_NAMESPACE[CONTROL_ARM]
+    calls = {"n": 0}
+
+    def flaky(namespace, workloads):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("the api server is having a moment")
+        return _ok()
+
+    res = twoarm.wait_settled(["redis"], status_fn=flaky, poll=0, stable_samples=2,
+                              timeout=1e6, sleep=lambda _s: None, clock=lambda: 0.0)
+    assert res["settled"] is True
+
+
+def test_settle_result_is_recorded_on_both_arm_rows():
+    """Recorded, not assumed -- a reader has to be able to see which pairs
+    started from a verified-clean cluster and which ran out of patience."""
+    res = twoarm.inject_both(spec(), injector=FakeInjector())
+    rows = twoarm.pair_rows(spec(), res, load_attested=False,
+                            settle=dict(settled=False, waited_s=540.0), trail_s=300.0)
+    assert all(set(PAIRS_COLUMNS) >= set(r) for r in rows)
+    assert [r["settled_ok"] for r in rows] == [False, False]
+    assert [r["settled_s"] for r in rows] == [540.0, 540.0]
+    # The censoring horizon travels with the row: "NOT_RECOVERED" is unreadable
+    # without the number of seconds we actually watched.
+    assert [r["trail_s"] for r in rows] == [300.0, 300.0]
+
+
+# --- ordering ---------------------------------------------------------------
+
+def test_rotate_order_makes_every_prefix_of_the_campaign_balanced():
+    """For an overnight run, being interrupted is the case that happens. Under
+    the original workload-major order a campaign cut off at 40% has three fault
+    types on ONE workload and nothing on the other two -- every number
+    workload-confounded. Rotate costs precision instead of whole rows."""
+    plan = twoarm.paired_plan(rounds=1, order="rotate")
+    faults = [s.fault_type for s in plan]
+    assert set(faults[:4]) == set(chaos.FAULTS) | {"POD_KILL"}   # all four in 4 pairs
+    # and the first three pairs of any one fault type cover all three workloads
+    first_cpu = [s.workload for s in plan if s.fault_type == "CPU_HOG"][:3]
+    assert set(first_cpu) == set(chaos.WORKLOADS)
+
+
+def test_changing_the_order_does_not_renumber_and_so_does_not_re_run():
+    """`pair_id` is the resume key. If it encoded the order, switching orders
+    would silently re-run a finished campaign from scratch instead of
+    continuing it."""
+    nested = {s.pair_id for s in twoarm.paired_plan(rounds=2, order="nested")}
+    rotate = {s.pair_id for s in twoarm.paired_plan(rounds=2, order="rotate")}
+    assert nested == rotate
+
+
+def test_an_unknown_order_is_refused_rather_than_silently_nested():
+    with pytest.raises(ValueError, match="unknown order"):
+        twoarm.paired_plan(order="whatever")
+
+
+def test_duration_is_plumbed_through_to_every_spec():
+    assert {s.duration_s for s in twoarm.paired_plan(duration_s=180)} == {180}
+
+
+def test_campaign_runs_the_gate_before_each_pair_and_records_it(tmp_path):
+    """Before, not after: a campaign resumed minutes after one died
+    mid-MEMORY_LEAK is exactly the case where the cluster is still unwinding
+    and nothing has waited for it."""
+    seen = []
+
+    def fake_gate(workloads):
+        seen.append(tuple(workloads))
+        return dict(settled=True, waited_s=31.0, polls=4, detail="fine")
+
+    twoarm.campaign(rounds=1, fault_types=["POD_KILL"], outdir=str(tmp_path),
+                    gap=0, load_attested=True, injector=FakeInjector(),
+                    probe_fn=fake_probe, sleep=lambda _s: None,
+                    settle_fn=fake_gate)
+    assert len(seen) == len(chaos.WORKLOADS)          # one gate per pair
+    written = pd.read_csv(tmp_path / "pairs.csv")
+    assert set(written["settled_ok"]) == {True}
+    assert set(written["settled_s"]) == {31.0}
+
+
 def main() -> None:
     raise SystemExit(pytest.main([__file__, "-q"]))
 

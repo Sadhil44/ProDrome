@@ -35,8 +35,89 @@ python collect/twoarm.py --campaign --load-attested    # the real run
 python -m eval.recovery --indir data/twoarm
 ```
 
-Tests: `pytest eval/test_recovery.py collect/test_twoarm.py -q` — 60 tests, no
-cluster, no Docker, no files under `data/`.
+Tests: `pytest eval/test_recovery.py collect/test_twoarm.py -q` — no cluster,
+no Docker, no files under `data/`.
+
+### The 2026-10-05 campaign — regenerate it with exactly this
+
+```bash
+python collect/twoarm.py --campaign --null-run \
+  --order rotate --duration 180 --settle-gate --gap 0 --rounds 3 \
+  --outdir data/twoarm
+python -m eval.recovery --indir data/twoarm
+```
+
+Run both from **inside WSL**. kubectl only works there — the kubeconfig is
+`~/.kube/config` inside WSL and there is no Windows one, so from PowerShell or
+Git Bash every call fails with `dial tcp [::1]:8080`, which means *no
+kubeconfig*, not *dead cluster*.
+
+Three flags are new, and each one is a claim about how the arms were kept
+comparable:
+
+- **`--settle-gate`** polls **both** arms before every pair until each workload
+  is Ready *and* its restart counter has not moved for 3 consecutive polls.
+  This replaces the implicit half of the blind ~9-minute gap — "whatever the
+  last pair broke has probably finished unbreaking" — with a checked
+  precondition, because a pod still in CrashLoopBackOff would otherwise be
+  sampled as the *next* pair's quiet baseline and poison its latency band. It
+  waits for both arms, so it cannot hand one arm a cleaner starting state;
+  `settled_ok`/`settled_s` land in `pairs.csv` per pair; a timeout is recorded,
+  not fatal.
+- **`--gap 0`** is only defensible here. The gap's *explicit* purpose — keeping
+  a pair out of the detector's post-restart dead zone — still stands, and that
+  bias runs **one way** (it makes Prodrome look worse). It is safe to drop in
+  this campaign solely because `DRY_RUN = True` and no controller process is
+  running, so there is no dead zone. **Restore `--gap` the moment the
+  controller is live.**
+- **`--order rotate`** emits one pair per fault type in turn, workload cycling
+  fastest, so every *prefix* of an interrupted overnight campaign is still
+  balanced across fault types and workloads. `pair_id` deliberately does not
+  encode the order — it is the resume key, so changing the order continues a
+  campaign rather than silently re-running it.
+
+`pairs.csv` gained three columns, appended at the end (old files still load):
+`settled_ok`, `settled_s`, and **`trail_s`, the censoring horizon**. A row
+reading `NOT_RECOVERED` means "still down after `trail_s` seconds", and that
+sentence cannot be read without the number.
+
+### What a `DRY_RUN = True` campaign can and cannot measure
+
+With shadow mode on, `execute_action()` returns `"dry-run"` before touching the
+API. The treatment arm is therefore a **second control arm**, and a naive
+two-arm table compares stock Kubernetes against stock Kubernetes plus a logger.
+`attest_treatment_arm_live()` fails and nothing is publishable as a comparison.
+
+Two things remain true, and `recovery.py` computes both:
+
+- **`stock_baseline_table(measured, shadow_mode=True)`** — recovery per fault
+  type with both arms **pooled**. Pooling is valid *because* the treatment arm
+  is inert: the arm label carries no information, so the two columns are two
+  draws from one distribution and `n` doubles. The same fact that permits this
+  is the fact that forbids the comparison, so the function **raises** on
+  `shadow_mode=False` — once Prodrome acts, pooling averages the treatment into
+  its own baseline. This table is the bar a future live run has to clear.
+- **`shadow_noise_floor(measured, tie_band)`** — the true per-pair delta here is
+  **zero by construction**, so every difference reported is the harness
+  measuring one system twice. `min_detectable_effect_s` (p90 of |delta|, floored
+  at the sampling resolution) is the smallest advantage a live run could claim
+  and still be distinguishable from this null run. A lopsided sign split would
+  be evidence of an **asymmetry in this harness**, not of an effect — there is
+  no treatment to have caused one.
+
+**There is no counterfactual.** Shadow mode is supposed to still yield "Prodrome
+*would have* restarted at t+22s" from `data/decisions/log.csv`, but that needs
+the controller to have been *running* and logging; it was not, and the file does
+not exist. `attest_counterfactual_available()` prints that in the report rather
+than letting the absence pass as an omission — the gap between "decided not to
+act" and "was never asked" is the whole difference. None was manufactured.
+
+**POD_KILL caveat, narrowed.** "POD_KILL is structurally unmeasurable" is true
+of **lead time** in `data/chaos/runs.csv` (`failure_ts == start_ts`, zero-width,
+zero ticks). It is *not* true of recovery time here: `outage_outcome()` derives
+the failure instant from the symmetric health series rather than from
+`failure_ts`, so POD_KILL recovery is measurable in this harness. It remains a
+designed tie (`POLICY` → `nothing`), so it is a sanity floor, not a target.
 
 ### Recovery time is not one number
 
