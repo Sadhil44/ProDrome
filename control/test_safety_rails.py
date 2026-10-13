@@ -34,6 +34,7 @@ make the rest of this file pass for the wrong reason.
 
 import ast
 import csv
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,9 +201,39 @@ def isolate_controller_state(tmp_path, monkeypatch):
     monkeypatch.setattr(controller, "LOG_FILE", tmp_path / "decisions" / "log.csv")
     monkeypatch.setattr(controller, "STOP_FILE", tmp_path / "STOP")
     monkeypatch.setattr(controller, "last_action_time", {})
+    # The kill switch deliberately ALSO honours a cwd-relative STOP, so without
+    # emptying this a test would read the repo's real working directory -- the
+    # same leak `STOP_FILE` is redirected to avoid. The union behaviour gets its
+    # own test, which puts a path back.
+    monkeypatch.setattr(controller, "EXTRA_STOP_PATHS", [])
+    # Note: the cooldown lease directory needs no redirect of its own. It is
+    # derived from LOG_FILE (`controller.cooldown_dir()`), so redirecting the log
+    # moves the shared cooldown state with it -- which is the point of deriving
+    # it rather than naming it separately.
     assert controller.DRY_RUN is True, "DRY_RUN must be True at the start of every test"
     yield
     assert controller.DRY_RUN is True, "a test left DRY_RUN flipped"
+
+
+def rewind_cooldown(workload, seconds):
+    """Age `workload`'s cooldown by `seconds`, in BOTH places that hold it.
+
+    The in-memory dict alone is no longer the state: `last_action()` takes the
+    later of memory and the shared lease file, so a test that rewound only the
+    dict would be asserting against a cooldown the lease is still holding open.
+    That is the fail-safe direction, which is exactly why it has to be rewound
+    deliberately rather than by forgetting.
+    """
+    when = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    controller.last_action_time[workload] = when
+    lease = controller.cooldown_dir() / controller._lease_name(workload)
+    if lease.exists():
+        lease.write_text(when.isoformat())
+    return when
+
+
+def lease_for(workload):
+    return controller.cooldown_dir() / controller._lease_name(workload)
 
 
 @pytest.fixture
@@ -389,9 +420,7 @@ def test_the_cooldown_expires(live):
     """
     api = SpyAppsApi(replicas=1)
     assert run_once(api, "rolling_restart")[0] == "executed"
-    controller.last_action_time["nginx"] = datetime.now(timezone.utc) - timedelta(
-        seconds=controller.COOLDOWN_SECONDS + 1
-    )
+    rewind_cooldown("nginx", controller.COOLDOWN_SECONDS + 1)
     assert not controller.cooldown_active("nginx")
     assert run_once(api, "rolling_restart")[0] == "executed"
     assert len(api.mutations) == 2
@@ -639,7 +668,7 @@ def test_nothing_never_reaches_the_cluster(live):
     to be unable to call the API by construction.
     """
     result, _, _ = run_once(ForbiddenApi(), "nothing")
-    assert result == "not-fired"
+    assert result == "abstained"
     assert controller.last_action_time == {}
 
 
@@ -668,7 +697,7 @@ def test_a_firing_without_enough_history_does_not_act(live):
         ForbiddenApi(), "nginx", one_tick(), detector, classifier,
         full_history()[: WINDOW_SIZE - 1],
     )
-    assert result == "not-fired"
+    assert result == "abstained"
     assert classifier.calls == 0
     assert log_rows()[-1]["action"] == "nothing"
 
@@ -796,7 +825,7 @@ def test_the_attribution_is_not_computed_on_a_short_window(live):
         ForbiddenApi(), "nginx", one_tick(), FakeDetector(), classifier,
         full_history()[: WINDOW_SIZE - 1],
     )
-    assert result == "not-fired"
+    assert result == "abstained"
     assert classifier.explained == [], "explain() was called on a short window"
     assert classifier.calls == 0
     row = log_rows()[-1]
@@ -866,3 +895,450 @@ def test_the_shipped_classifier_publishes_the_attribution_capability():
     assert {"predict", "top_features", "explain"} <= defined, (
         f"ml/classifier.py no longer publishes the attribution interface: {sorted(defined)}"
     )
+
+
+# --- gap 1: the cooldown has to hold BETWEEN processes -----------------------
+#
+# `last_action_time` was a plain module-level dict. Two controllers -- or one
+# controller plus the eval harness calling `execute_action` directly -- each
+# believed independently that it was within budget, and every row both wrote
+# read `executed` and looked correct. The cooldown is now mirrored to a lease
+# file per workload beside the decision log.
+#
+# A second process is simulated by clearing `last_action_time` and nothing else:
+# that dict is precisely the state a second process would not share, so what
+# survives the clear is what crosses the process boundary. Deliberately not by
+# spawning a subprocess -- that would test the fork, not the rail.
+
+
+def test_an_executed_action_leaves_a_lease_a_second_process_can_read(live):
+    api = SpyAppsApi(replicas=1)
+    assert run_once(api, "rolling_restart")[0] == "executed"
+    lease = lease_for("nginx")
+    assert lease.exists(), "the action left no shared record of itself"
+    recorded = datetime.fromisoformat(lease.read_text())
+    assert (datetime.now(timezone.utc) - recorded).total_seconds() < 60
+
+
+def test_the_cooldown_holds_for_a_process_that_never_saw_the_action(live):
+    """The gap itself. Nothing in this process's memory remembers the action;
+    the rail has to hold anyway, or two controllers stack remediations on one
+    workload at a 5.0% false-positive rate with neither aware of the other.
+    """
+    api = SpyAppsApi(replicas=1)
+    assert run_once(api, "rolling_restart")[0] == "executed"
+
+    controller.last_action_time.clear()  # a second process starts here
+
+    assert controller.cooldown_active("nginx"), "a second process shares no cooldown"
+    assert run_once(api, "rolling_restart")[0] == "blocked-cooldown"
+    assert len(api.mutations) == 1, "the second process remediated the same workload again"
+
+
+def test_a_direct_execute_action_caller_cannot_bypass_the_cooldown(live):
+    """`evaluate_once` is not the only caller -- the eval harness and any
+    head-to-head script call `execute_action`. A rail enforced one level up is
+    bypassed by every one of them, which is the lesson the kill switch already
+    taught this file.
+    """
+    api = SpyAppsApi(replicas=1)
+    assert controller.execute_action(api, "nginx", "rolling_restart") == "executed"
+    assert controller.execute_action(api, "nginx", "rolling_restart") == "blocked-cooldown"
+    assert len(api.mutations) == 1
+
+
+def test_the_later_of_memory_and_the_lease_wins(live):
+    """Fail-safe combination: whichever source says "more recently" wins, so
+    neither a stale lease nor a restarted process can SHORTEN a cooldown.
+    """
+    api = SpyAppsApi(replicas=1)
+    run_once(api, "rolling_restart")
+
+    # Lease fresh, memory ancient.
+    controller.last_action_time["nginx"] = datetime.now(timezone.utc) - timedelta(days=1)
+    assert controller.cooldown_active("nginx")
+
+    # Memory fresh, lease ancient.
+    controller.last_action_time["nginx"] = datetime.now(timezone.utc)
+    lease_for("nginx").write_text(
+        (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    )
+    assert controller.cooldown_active("nginx")
+
+
+def test_an_unreadable_lease_fails_closed_but_not_forever(live):
+    """A corrupt lease must not fail OPEN -- ignoring it means no cooldown at
+    all. It must not fail closed forever either: a permanent lockout caused by
+    one bad file looks exactly like a working rail from the outside. Bounded to
+    one window by falling back to the file's mtime.
+    """
+    controller.cooldown_dir().mkdir(parents=True, exist_ok=True)
+    lease = lease_for("nginx")
+    lease.write_text("this is not a timestamp")
+    assert controller.cooldown_active("nginx"), "a corrupt lease failed open"
+
+    old = datetime.now(timezone.utc) - timedelta(seconds=controller.COOLDOWN_SECONDS + 60)
+    os.utime(lease, (old.timestamp(), old.timestamp()))
+    assert not controller.cooldown_active("nginx"), "a corrupt lease became a lockout"
+
+
+def test_a_lease_that_cannot_be_written_warns_and_still_remediates(live, capsys, monkeypatch):
+    """The cluster write has already happened by the time the lease is recorded,
+    so raising here would make `evaluate_once` log a successful remediation as
+    `failed`. It must not be silent either: the cross-process guarantee is gone
+    the moment this fails, and silence would degrade it back to exactly the
+    process-local behaviour this code exists to replace.
+    """
+    def refuse(src, dst):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(controller.os, "replace", refuse)
+    api = SpyAppsApi(replicas=1)
+    assert run_once(api, "rolling_restart")[0] == "executed"
+
+    assert "PROCESS-LOCAL ONLY" in capsys.readouterr().out, "a degraded rail was silent"
+    assert controller.cooldown_active("nginx"), "the in-process cooldown degraded too"
+
+
+def test_shadow_mode_neither_writes_nor_reads_a_lease():
+    """DRY_RUN is on here. The shadow arm must describe what Prodrome would have
+    done ON ITS OWN: if a live controller's leases could make shadow rows read
+    `blocked-cooldown`, collect's control-arm comparison would be measuring the
+    live arm's side effects through the back door.
+    """
+    api = ForbiddenApi()
+    assert run_once(api, "rolling_restart")[0] == "dry-run"
+    assert not lease_for("nginx").exists(), "the shadow arm wrote shared state"
+
+    controller.cooldown_dir().mkdir(parents=True, exist_ok=True)
+    lease_for("nginx").write_text(datetime.now(timezone.utc).isoformat())
+    assert not controller.cooldown_active("nginx"), "shadow read another process's lease"
+    assert run_once(api, "rolling_restart")[0] == "dry-run"
+
+
+def test_the_lease_directory_follows_the_decision_log():
+    """Derived from LOG_FILE, not named separately, so anything that redirects
+    one redirects the other. Two files that disagree about what happened are
+    worse than one.
+    """
+    assert controller.cooldown_dir() == controller.LOG_FILE.parent / "cooldowns"
+
+
+@pytest.mark.parametrize("workload", ["nginx", "a/b", "..", "UPPER", "with space", ""])
+def test_lease_names_are_path_safe(workload):
+    """Percent-encoded rather than sanitised: sanitising maps two different
+    workloads onto one file, and two workloads silently sharing a cooldown is a
+    rail doing the wrong thing quietly.
+    """
+    name = controller._lease_name(workload)
+    assert "/" not in name and "\\" not in name
+    assert (controller.cooldown_dir() / name).parent == controller.cooldown_dir()
+
+
+def test_every_workload_gets_its_own_lease_file():
+    names = {controller._lease_name(w) for w in ["nginx", "a/b", "a%2Fb", "A/B"]}
+    assert len(names) == 4, "two workloads would share one cooldown"
+
+
+# --- gap 2: STOP must not be resolved against the working directory ----------
+
+
+def test_the_committed_stop_file_is_anchored_to_the_repo_not_the_cwd():
+    """Asserted against the parsed source, because the fixtures redirect
+    STOP_FILE. `Path("STOP")` means an operator who creates STOP in the repo
+    root while the controller runs from elsewhere gets a kill switch that
+    silently does nothing -- the worst possible failure for this control.
+    """
+    tree = ast.parse(CONTROLLER_SOURCE.read_text())
+    assigned = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "STOP_FILE" for t in node.targets)
+    ]
+    assert len(assigned) == 1, "STOP_FILE is assigned more or less than once at module scope"
+    value = assigned[0]
+    assert isinstance(value, ast.BinOp), "STOP_FILE is not built from an anchor path"
+    assert isinstance(value.left, ast.Name) and value.left.id == "REPO_ROOT", (
+        "STOP_FILE must be anchored to REPO_ROOT, not resolved against the cwd"
+    )
+    assert controller.REPO_ROOT == REPO_ROOT
+    assert (REPO_ROOT / "STOP").is_absolute()
+
+
+def test_the_kill_switch_is_found_from_any_working_directory(live, tmp_path, monkeypatch):
+    """The behavioural half: the switch is wherever STOP_FILE points, no matter
+    where the process was started.
+    """
+    anchored = tmp_path / "anchor"
+    anchored.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(controller, "STOP_FILE", anchored / "STOP")
+    monkeypatch.chdir(elsewhere)
+
+    assert not controller.kill_switch_active()
+    (anchored / "STOP").write_text("halt\n")
+    assert controller.kill_switch_active(), "the kill switch moved with the working directory"
+    assert controller.execute_action(ForbiddenApi(), "nginx", "rolling_restart") == (
+        "blocked-kill-switch"
+    )
+
+
+def test_a_stop_in_the_working_directory_also_stops_the_controller(live, tmp_path, monkeypatch):
+    """A kill switch should fail in the direction of stopping, so the rule is
+    "ANY of these files", not "exactly this one". An operator who drops STOP in
+    the directory they are standing in gets a stop too.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(controller, "EXTRA_STOP_PATHS", [Path("STOP")])
+
+    assert not controller.kill_switch_active()
+    (elsewhere / "STOP").write_text("halt\n")
+    assert controller.kill_switch_active()
+    assert controller.execute_action(ForbiddenApi(), "nginx", "scale_out") == (
+        "blocked-kill-switch"
+    )
+
+
+def test_the_startup_report_names_every_path_that_stops_the_controller(stop_file):
+    """A kill switch nobody can locate is not a kill switch. These paths used to
+    be discoverable only by reading the source AND knowing the working directory.
+    """
+    report = controller.startup_report()
+    for path in controller.kill_switch_paths():
+        assert str(path) in report
+    assert str(controller.STOP_FILE) in report
+    assert "ENGAGED" in report, "STOP exists and the startup report did not say so"
+    assert str(controller.LOG_FILE.resolve()) in report
+    assert str(controller.cooldown_dir().resolve()) in report
+
+
+def test_the_startup_report_says_open_when_there_is_no_stop_file():
+    report = controller.startup_report()
+    assert "ENGAGED" not in report and "open" in report
+    assert "shadow" in report, "the startup report must say which mode it is in"
+
+
+def test_run_loop_prints_the_startup_report():
+    """Pinned by parsing rather than by running: `run_loop` does not return."""
+    tree = ast.parse(CONTROLLER_SOURCE.read_text())
+    loop = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_loop"
+    )
+    called = {
+        inner.func.id for inner in ast.walk(loop)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+    }
+    assert "startup_report" in called, "the loop starts without saying where its rails are"
+
+
+# --- gap 3: a global cap on actions across ALL workloads ---------------------
+#
+# The cooldown is per workload, so six workloads firing at once produced six
+# simultaneous remediations, each individually within its rails -- and six
+# workloads firing at once is the shape of a node-level problem, which is
+# exactly when remediating everything at once is itself the destabilising event.
+
+
+def test_the_fleet_budget_refuses_the_action_after_the_cap(live):
+    api = SpyAppsApi(replicas=1)
+    workloads = [f"w{i}" for i in range(controller.MAX_ACTIONS_PER_WINDOW + 1)]
+    results = [run_once(api, "rolling_restart", workload=w)[0] for w in workloads]
+
+    assert results[:-1] == ["executed"] * controller.MAX_ACTIONS_PER_WINDOW
+    assert results[-1] == "blocked-rate-limit"
+    assert len(api.mutations) == controller.MAX_ACTIONS_PER_WINDOW, (
+        "more workloads were remediated than the fleet budget allows"
+    )
+
+
+def test_the_rate_limit_refusal_reaches_the_decision_log(live):
+    """A refusal nobody can see is not a rail. This is the row that tells an
+    operator the problem is bigger than any one workload.
+    """
+    api = SpyAppsApi(replicas=1)
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW + 1):
+        run_once(api, "rolling_restart", workload=f"w{i}")
+
+    row = log_rows()[-1]
+    assert row["result"] == "blocked-rate-limit"
+    assert row["fired"] == "True" and row["action"] == "rolling_restart"
+    assert row["mode"] == "live"
+
+
+def test_a_rate_limited_refusal_records_no_cooldown(live):
+    """Same lockout argument as the kill switch: a blocked action that recorded
+    a timestamp would push its own window forward on every firing.
+    """
+    api = SpyAppsApi(replicas=1)
+    blocked = f"w{controller.MAX_ACTIONS_PER_WINDOW}"
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW + 1):
+        run_once(api, "rolling_restart", workload=f"w{i}")
+
+    assert blocked not in controller.last_action_time
+    assert not lease_for(blocked).exists()
+    assert not controller.cooldown_active(blocked)
+
+
+def test_the_fleet_budget_reopens_when_the_window_passes(live):
+    api = SpyAppsApi(replicas=1)
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW):
+        run_once(api, "rolling_restart", workload=f"w{i}")
+    assert controller.rate_limit_active()
+
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW):
+        rewind_cooldown(f"w{i}", controller.RATE_LIMIT_WINDOW_SECONDS + 1)
+
+    assert not controller.rate_limit_active(), "a rail that never expires is broken too"
+    assert run_once(api, "rolling_restart", workload="fresh")[0] == "executed"
+
+
+def test_the_fleet_budget_counts_another_process_actions(live):
+    """The cap is fleet-wide across PROCESSES too, or two controllers each get
+    their own budget and the real cap is whatever number you first thought of,
+    times the number of controllers.
+    """
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW):
+        controller.record_action(f"other-{i}")
+    controller.last_action_time.clear()  # a second process starts here
+
+    assert controller.rate_limit_active()
+    assert run_once(SpyAppsApi(replicas=1), "rolling_restart", workload="mine")[0] == (
+        "blocked-rate-limit"
+    )
+
+
+def test_a_direct_execute_action_caller_cannot_bypass_the_fleet_budget(live):
+    api = SpyAppsApi(replicas=1)
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW):
+        assert controller.execute_action(api, f"w{i}", "rolling_restart") == "executed"
+    assert controller.execute_action(api, "one-too-many", "rolling_restart") == (
+        "blocked-rate-limit"
+    )
+    assert len(api.mutations) == controller.MAX_ACTIONS_PER_WINDOW
+
+
+def test_actions_that_issue_no_write_do_not_spend_the_fleet_budget(live):
+    """`alert_only` and a scale_out already at the cap touch nothing, so they
+    must not consume a budget that real remediations need.
+    """
+    api = SpyAppsApi(replicas=controller.MAX_REPLICAS)
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW + 2):
+        assert controller.execute_action(api, f"w{i}", "alert_only") == "no-op"
+        assert controller.execute_action(api, f"s{i}", "scale_out") == "at-max"
+    assert controller.recent_actions() == []
+    assert not controller.rate_limit_active()
+
+
+def test_the_kill_switch_and_the_cooldown_both_outrank_the_fleet_budget(live, stop_file):
+    """Ordering, pinned: when several rails would all refuse, the log gets the
+    most specific reason, because that is the one an operator can act on.
+    """
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW):
+        controller.record_action(f"w{i}")
+    assert controller.rate_limit_active()
+    assert run_once(ForbiddenApi(), "rolling_restart", workload="nginx")[0] == (
+        "blocked-kill-switch"
+    )
+
+    stop_file.unlink()
+    controller.record_action("nginx")
+    assert run_once(ForbiddenApi(), "rolling_restart", workload="nginx")[0] == (
+        "blocked-cooldown"
+    )
+
+
+def test_the_rate_limit_window_matches_the_cooldown_window():
+    """Load-bearing, not cosmetic. One lease file per workload is an EXACT count
+    of actions in the window only because a workload cannot act twice inside its
+    own cooldown. A window longer than the cooldown silently undercounts.
+    """
+    assert controller.RATE_LIMIT_WINDOW_SECONDS == controller.COOLDOWN_SECONDS
+
+
+def test_the_fleet_budget_is_invisible_in_shadow_mode():
+    """DRY_RUN is on. Same reasoning as the cooldown: the shadow arm must not
+    observe a budget it did not spend. The consequence, which collect already
+    has in writing, is that shadow action counts are an UPPER BOUND on live ones
+    rather than like-for-like.
+    """
+    controller.cooldown_dir().mkdir(parents=True, exist_ok=True)
+    for i in range(controller.MAX_ACTIONS_PER_WINDOW + 3):
+        lease_for(f"other-{i}").write_text(datetime.now(timezone.utc).isoformat())
+
+    assert not controller.rate_limit_active()
+    assert run_once(ForbiddenApi(), "rolling_restart")[0] == "dry-run"
+
+
+# --- gap 4: `result="not-fired"` on a row where `fired=True` -----------------
+#
+# Announced as a decision-log contract change (cluster/interfaces, labelled for
+# diagnosis and collect) before being made, because `result` values may be
+# filtered downstream.
+
+
+def test_a_fired_tick_the_policy_abstained_on_is_not_called_not_fired(live):
+    """The mislabel itself: `fired=True` beside `result=not-fired`, two columns
+    flatly contradicting each other, on one of the most common rows in the log.
+    """
+    run_once(ForbiddenApi(), "nothing")
+    row = log_rows()[-1]
+    assert row["fired"] == "True"
+    assert row["result"] == "abstained"
+    assert row["action"] == "nothing"
+
+
+def test_not_fired_now_means_exactly_fired_is_false(live):
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(fired=False),
+        FakeClassifier(label_for("rolling_restart"), 1.0), full_history(),
+    )
+    row = log_rows()[-1]
+    assert row["fired"] == "False"
+    assert row["result"] == "not-fired"
+
+
+def test_both_abstention_paths_log_abstained(live):
+    """Two different ways to abstain -- below the policy's confidence floor, and
+    too little history to ask the classifier at all -- and both happen on a tick
+    that FIRED.
+    """
+    low = policy.POLICY[label_for("rolling_restart")]["min_confidence"] - 0.01
+    assert run_once(ForbiddenApi(), "rolling_restart", confidence=low)[0] == "abstained"
+
+    result = controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(),
+        FakeClassifier(label_for("rolling_restart"), 1.0),
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    assert result == "abstained"
+
+
+def test_no_row_in_the_log_ever_claims_not_fired_while_fired_is_true(live):
+    """Swept over every action and both abstention paths at once, because this
+    is a consistency property of the log rather than of any single branch.
+    """
+    for action in ALL_ACTIONS:
+        run_once(SpyAppsApi(replicas=1), action, workload=f"w-{action}")
+        run_once(SpyAppsApi(replicas=1), action, workload=f"lo-{action}", confidence=0.0)
+    controller.evaluate_once(
+        ForbiddenApi(), "short", one_tick(), FakeDetector(),
+        FakeClassifier(label_for("rolling_restart"), 1.0),
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    controller.evaluate_once(
+        ForbiddenApi(), "quiet", one_tick(), FakeDetector(fired=False),
+        FakeClassifier(label_for("rolling_restart"), 1.0), full_history(),
+    )
+
+    rows = log_rows()
+    assert rows
+    for row in rows:
+        if row["result"] == "not-fired":
+            assert row["fired"] == "False", f"contradictory row: {row}"
+        if row["fired"] == "False":
+            assert row["result"] == "not-fired", f"contradictory row: {row}"
