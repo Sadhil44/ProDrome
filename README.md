@@ -44,7 +44,7 @@ The pipeline runs end to end on real data: 11,946 metric samples across 160 labe
 
 **Detector.** On known-clean windows the false-positive rate is **5.0%**, against a **61.5%** firing rate inside fault windows — a 9.1× separation, or 1.86 false positives per workload-hour. About 40% of all firings are a *post-fault tail* lasting ~300s, not false alarms on healthy traffic. Lead time, for the one class with a true failure instant, is a median of **35.8s** before failure.
 
-**Classifier.** 0.92 accuracy and 0.82 macro F1 on held-out runs. Read the macro number, not accuracy: the test set is 65% `DISK_STRESS`, which classifies at 0.98 F1 and drags the aggregate up. `MEMORY_LEAK` sits at **0.61** and is the weak class.
+**Classifier.** 0.92 accuracy and 0.82 macro F1 on held-out runs. Read the macro number, not accuracy: the test set is 65% `DISK_STRESS`, which classifies at 0.98 F1 and drags the aggregate up. `MEMORY_LEAK` sits at **0.61** and is the weak class. This number is measured on the same three services it was trained on — see below for what happens when it isn't.
 
 ### What is measured and is bad news
 
@@ -53,6 +53,8 @@ These are the results that matter most, because they bound what the system can c
 **The model never abstains.** Train on two fault types, hold the third out, and ask what it does with a fault it has never seen. On real data it is confidently wrong — above the 0.80 threshold that triggers a real action — on **71.5%** of unseen-fault windows, and correctly abstains on **0%** of them. A confidence floor is not novelty detection. This is the single strongest reason the controller stays in dry-run.
 
 **`CPU_HOG` is diagnosed from the wrong evidence.** Per-prediction attribution puts only **6.0%** of the decision on CPU metrics and ~80% on memory and filesystem. Deleting *every* CPU feature makes `CPU_HOG` classification **better** (F1 0.883 → 0.936, consistent across 7 random seeds). The model has learned the fault injector's memory and I/O footprint, not CPU pressure — so the `CPU_HOG` result is not evidence that Prodrome detects CPU exhaustion, and would not be expected to transfer to real application load.
+
+**The headline does not transfer to a service the model has not seen.** Hold out a whole *workload* instead of a run and macro F1 falls from 0.765 to **0.484** on `postgres` (7 seeds). `DISK_STRESS` transfers intact and `CPU_HOG` half-transfers, but `MEMORY_LEAK` breaks: on that arm it scores **0.038**, with 5 of 7 seeds at exactly **0.000**. The model never once correctly names a memory leak on a service it was not trained on — it calls it disk stress, sweeping **96.3%** of true leak windows into the majority class. Accuracy on that same arm is still 0.761, so reading accuracy rather than macro F1 hides the whole thing. Held out `redis` the drop is −0.083; held out `nginx` it is inside seed noise. Caveat recorded in [`ml/holdout.py`](ml/holdout.py): `MEMORY_LEAK` has only 44 training windows, so "unseen workload" and "shrunken training set" predict the same result here and this dataset cannot separate them.
 
 **A fixed analysis window cannot represent half the fault classes.** The window is 20 samples at 15s = 5.00 minutes. `MEMORY_LEAK` runs median 87.5s and `POD_KILL` 8.7s, so **zero** runs of either are long enough to contain one full window. The two classes with high F1 are exactly the two injected at ~300s — almost precisely the window length. Reported accuracy therefore substantially measures how well each fault's duration happens to match the window, not diagnostic skill.
 
@@ -68,6 +70,7 @@ Reproducing the analysis needs no cluster and no Docker — just the Python depe
 python -m ml.train        # classifier, split by run: report, confusion matrix, importances
 python -m ml.abstention   # the held-out-fault safety numbers
 python -m ml.ablation     # is a fault class detected from its own metric?
+python -m ml.holdout      # does it transfer to a service it never trained on?
 python -m ml.classifier   # refit and re-pickle the shipped model
 python -m dashboard.terminal   # live view over the decision log
 ```
