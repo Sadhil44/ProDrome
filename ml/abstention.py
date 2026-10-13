@@ -251,17 +251,32 @@ def combined_gate(calibration_scores, target_scores, parts=GATE_PARTS):
 
 
 def calibration_split(known_test, seed=7):
-    """Halve the known test set BY RUN, for calibration and for evaluation.
+    """Halve the known test set BY RUN and PER LABEL, for calibration and evaluation.
 
-    Without this the gate's threshold is read off the same windows it is then
-    scored against, and the known-class rejection rate comes out flattered.
+    Without the halving the gate's threshold is read off the same windows it is
+    then scored against, and the known-class rejection rate comes out flattered.
     Splitting by run rather than by row for the same reason ml.train does:
     sliding windows share WINDOW_SIZE-1 of their timesteps, so a row split puts
     near-duplicates on both sides and the threshold transfers for free.
+
+    The per-label part was missing and it moved the published cost. The
+    calibration half SETS the threshold and the evaluation half MEASURES what it
+    costs, so if the two halves differ in label composition, the measured
+    known-rejection rate reports that composition instead of the budget. It
+    bites hardest where one label has few, large runs: this dataset has 15
+    CPU_HOG runs against 45 DISK_STRESS ones, and an unstratified shuffle can
+    put most of the small class on one side. Measured on the three class
+    holdouts, a nominal 5% budget came out as 0.024 / 0.068 / 0.077 unstratified
+    against 0.048 / 0.058 / 0.036 stratified; on a three-training-class variant
+    it read 0.200 for a 5% budget, which is a composition artifact and not a
+    property of the gate. Stratifying costs nothing and removes the artifact.
     """
-    runs = np.array(sorted(known_test["run_id"].unique()))
-    np.random.default_rng(seed).shuffle(runs)
-    calibration = set(runs[: len(runs) // 2])
+    rng = np.random.default_rng(seed)
+    calibration = set()
+    for _, rows in known_test.groupby("label"):
+        runs = np.array(sorted(rows["run_id"].unique()))
+        rng.shuffle(runs)
+        calibration.update(runs[: len(runs) // 2])
     in_calibration = known_test["run_id"].isin(calibration)
     return known_test[in_calibration], known_test[~in_calibration]
 

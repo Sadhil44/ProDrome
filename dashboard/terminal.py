@@ -53,6 +53,25 @@ def load_recent(path: Path = DECISIONS_LOG, max_rows: int = MAX_ROWS):
     return df.tail(max_rows).iloc[::-1].reset_index(drop=True)
 
 
+def _cell(value) -> str:
+    """One logged value as text, with a genuinely absent one shown as absent.
+
+    pandas reads an empty CSV cell as NaN, and `str(NaN)` is the word "nan" --
+    which in the `predicted_class` column reads exactly like a class name, and
+    in `confidence` like a number that failed to parse. Both are worse than a
+    blank, because the operator cannot tell a value the controller deliberately
+    left empty from a value this renderer mangled.
+
+    The controller leaves those two cells empty on a fired tick it never asked
+    the classifier about (history shorter than WINDOW_SIZE: every tick of the
+    first five minutes after any start or restart). That emptiness is the
+    signal -- no model was consulted -- so it is rendered as emptiness.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value)
+
+
 def render(df) -> Table:
     if df is None:
         table = Table(title=f"Prodrome — waiting for {DECISIONS_LOG}")
@@ -72,9 +91,19 @@ def render(df) -> Table:
         table.caption = f"[bold red]MISSING COLUMNS: {', '.join(missing)}[/] — log does not match SETUP.md S7"
 
     for _, row in df.iterrows():
-        fired = str(row.get("fired", ""))
-        style = "bold red" if fired in ("True", "1", "true") else "dim"
-        table.add_row(*(str(row.get(col, "")) for col in COLUMNS), style=style)
+        fired = str(row.get("fired", "")) in ("True", "1", "true")
+        predicted = _cell(row.get("predicted_class", ""))
+        if not fired:
+            style = "dim"
+        elif predicted:
+            style = "bold red"
+        else:
+            # Fired, but no classifier output in the row. That is not the same
+            # event as a fired tick the model answered -- nothing the operator
+            # is looking at came from a model -- so it must not borrow the
+            # colour that means "the model called a fault". See _cell.
+            style = "yellow"
+        table.add_row(*(_cell(row.get(col, "")) for col in COLUMNS), style=style)
 
     return table
 
