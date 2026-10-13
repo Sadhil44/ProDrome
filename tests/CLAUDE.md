@@ -30,8 +30,9 @@ to prove the pipeline does what it claims — and to make a broken claim fail lo
   has been written: `tests/test_units.py`'s
   `test_a_restart_is_suppressed_for_the_full_window_and_then_lifts` is the fresh-clone counterpart
   and does run in CI. The half it omits — that the restart shape *would* have fired without
-  `on_restart()` — does not hold through `update()` on any data, synthetic or real, so it is a
-  finding about the script rather than a gap here. Both remaining halves are signal's to fix;
+  `on_restart()` — is an open coverage gap, not an impossibility: that claim was true only of
+  the pre-fix `MetricDetector`, which folded each tick's error into the reference before scoring
+  against it, and `update()` now scores first. Both remaining halves are signal's to fix;
   `tests/test_ci_enforcement.py` records the reason and now checks the "no `test_` functions" part
   of it rather than trusting it.
 - **CI installs only what the suite imports**, not `requirements.txt` — that would pull ~2 GB of

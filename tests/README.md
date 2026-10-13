@@ -149,16 +149,23 @@ project decision on `crosstalk/decisions`, not something a test should force. Do
 `xfail_strict` to a pytest config — there is deliberately no `pytest.ini`, and adding one would
 turn two recorded findings into a red build.
 
-And one finding that is **not** an xfail, because its mechanism is now pinned by a passing
-test (`test_update_cannot_fire_on_an_arbitrarily_extreme_anomaly`):
-`MetricDetector.update()` appends this tick's error to the reference distribution *before*
-scoring against it, which makes the z-score scale-invariant. The single-tick ceiling is
-`(1/RECENT_WINDOW) * sqrt(ERROR_HISTORY)`, about 2.0, and a sustained burst peaks near 3.9 —
-both under `Z_THRESHOLD = 4.0`. So `Detector.score()`, the only public scoring API and the
-one the pickled artifact hands to the controller, cannot fire on a step change of *any*
-magnitude: 10x and 10^12x produce the identical score. `score_only()` on the same input
-fires immediately. That is the whole of the "fires 3 times across 160 fault runs"
-desensitization — not tuning, but training on the tick being scored.
+And one finding that is **not** an xfail, because the defect it records has since been fixed
+and its absence is pinned by a passing test
+(`test_update_fires_in_proportion_to_how_extreme_the_anomaly_is` in `tests/test_units.py`):
+`MetricDetector.update()` *used to* append this tick's error to the reference distribution
+before scoring against it, which made the z-score scale-invariant — 10x and 10^12x produced
+the identical score, under a single-tick ceiling of `(1/RECENT_WINDOW) * sqrt(ERROR_HISTORY)`,
+about 2.0, with a sustained burst peaking near 3.9, all below `Z_THRESHOLD = 4.0`. Since
+`Detector.score()` is the only public scoring API and the one the pickled artifact hands to
+the controller, the live gate never opened — the whole of the "fires 3 times across 160 fault
+runs" desensitization, not tuning but training on the tick being scored.
+
+What changed: `ml/detector.py:135-148` now scores first and folds the tick's error into the
+reference only when it did **not** look anomalous, capped at `SELF_EXCLUDE_CAP` consecutive
+exclusions so a genuine baseline shift is still learned. Magnitude therefore reaches the
+z-score, and `score()` — which still routes through `update()` — fires on input that
+`score_only()` fires on. The ceiling figures above describe the old ordering only; no
+replacement ceiling is quoted here because none has been measured against this code.
 
 ## Handoff: the end-to-end demo
 

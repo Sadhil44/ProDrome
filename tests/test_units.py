@@ -405,8 +405,14 @@ def test_a_restart_is_suppressed_for_the_full_window_and_then_lifts(healthy_metr
     without a collection handoff. It asserts only the half that can be asserted:
     that suppression holds for POST_RESTART_SUPPRESS_TICKS and then releases.
     The other half of that script -- that the restart shape WOULD have fired
-    without suppression -- does not hold through update() on any data, synthetic
-    or real; see test_update_cannot_fire_on_an_arbitrarily_extreme_anomaly.
+    without suppression -- is an open coverage gap, not an impossibility. The
+    old claim that it "does not hold through update() on any data, synthetic or
+    real" was a fact about the pre-fix MetricDetector, which folded each tick's
+    error into the reference before scoring against it; update() now scores
+    first (ml/detector.py:135-148), so magnitude reaches the z-score -- see
+    test_update_fires_in_proportion_to_how_extreme_the_anomaly_is. Closing the
+    gap needs a restart-shaped tick whose firing has actually been measured
+    against this fixture, which this test does not do.
     """
     workload = sorted(healthy_metrics["workload"].unique())[0]
     det = Detector.fit_healthy(healthy_metrics)

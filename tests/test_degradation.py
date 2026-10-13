@@ -194,8 +194,11 @@ def test_a_decision_row_missing_a_contract_column_is_caught_by_strict_selection(
     the `row.get(col, "")` pattern in dashboard/terminal.py renders blanks and
     says nothing.
 
-    This pins the behaviour a consumer must have -- and the companion xfail in
-    tests/test_integration.py records that the shipped dashboard does not have it.
+    This pins the behaviour a consumer must have -- and
+    test_the_dashboard_reads_the_decision_log_columns_the_contract_names in
+    tests/test_integration.py is the companion that pins the shipped dashboard
+    now having it: terminal.COLUMNS equals the contract, and a missing column
+    surfaces in the table caption rather than rendering as blanks.
     """
     rows, _ = decisions
     frame = pd.DataFrame(rows)

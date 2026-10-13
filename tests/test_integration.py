@@ -256,8 +256,9 @@ def test_the_controller_can_execute_every_action_the_policy_table_emits(live_con
     dry-run branch returns before the comparison. It would have surfaced on the
     day someone flipped DRY_RUN off, which is the worst possible time.
 
-    Cluster fixed it (origin/main: "Fixed controller wiring bug"), and the
-    recorded strict xfail is what caught the fix landing.
+    Cluster fixed it (origin/main: "Fixed controller wiring bug"), and the strict
+    xfail recorded here at the time was what caught the fix landing. It has since
+    been retired; this file carries no xfails today.
 
     This used to read execute_action()'s string literals with `ast`, because the
     module could not be imported without the kubernetes client. It now CALLS
