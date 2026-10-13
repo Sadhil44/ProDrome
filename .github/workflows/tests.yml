@@ -106,4 +106,6 @@ jobs:
           ml/test_scale_sensitivity.py
           ml/test_abstention.py
           collect/test_twoarm.py
+          collect/test_poscontrol.py
           eval/test_recovery.py
+          eval/test_sensitivity.py

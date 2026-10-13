@@ -109,7 +109,24 @@ RECOVERY_KIND = {
     "MEMORY_LEAK": OUTAGE,
     "CPU_HOG": DEGRADATION,
     "DISK_STRESS": DEGRADATION,
+    # Not a fault and not injectable by collect/chaos.py. `collect/poscontrol.py`
+    # takes both arms down together and brings ONE back a chosen number of
+    # seconds later, so the per-pair difference is known by construction and the
+    # harness can be checked against it. It is here because `measure()` refuses
+    # any fault type that has not declared its kind, which is the right rule.
+    #
+    # It has no row in control/policy.py ON PURPOSE: `lever_for` therefore
+    # resolves it to "nothing" and every table marks it comparable=False, so a
+    # manufactured effect cannot be read as a Prodrome win by a reader who only
+    # sees the table.
+    "POSITIVE_CONTROL": OUTAGE,
 }
+
+# The fault types collect/chaos.py can actually inject -- RECOVERY_KIND minus
+# the positive-control sentinel. Kept separate so "every injectable fault
+# declares its kind" stays checkable without the check also having to be
+# updated every time a non-fault measurement mode is added.
+CHAOS_FAULT_TYPES = frozenset({"POD_KILL", "MEMORY_LEAK", "CPU_HOG", "DISK_STRESS"})
 
 # Outcomes. Deliberately not booleans and deliberately never None-as-zero: a
 # fault that never caused an outage is the case Prodrome is SUPPOSED to produce,
@@ -361,12 +378,52 @@ def degradation_outcome(health_slice: pd.DataFrame, t0: pd.Timestamp,
 
 # --- per-pair-arm measurement ----------------------------------------------
 
+def pair_window_hi(p, window_seconds: float | str | None) -> pd.Timestamp | None:
+    """Upper edge of one pair's measurement window, or None for "no bound".
+
+    THE DEFAULT IS None AND THAT IS A KNOWN DEFECT, kept as the default only so
+    the 2026-10-06 campaign's published numbers stay reproducible.
+
+    With no bound, `measure` searches for the recovery instant from the
+    injection start to the END OF THE CAMPAIGN. For POD_KILL and MEMORY_LEAK
+    that is harmless -- they recover inside their own trailing window. For
+    CPU_HOG and DISK_STRESS it is not: `eval/sensitivity.py` found 5 of 18
+    CPU_HOG control-arm pairs whose "recovery" instant lands AFTER the next
+    pair on the same workload had already been injected, i.e. the latency band
+    was still being exceeded when the window should have closed and the
+    reported `degradation_seconds` is partly the next fault. That is most of
+    why CPU_HOG's observed p90 |delta| is 25.9s and DISK_STRESS's is 78.9s with
+    a 179.3s outlier -- numbers that are bleed, not noise.
+
+    `"trail"` bounds each pair at `end_ts + trail_s`, which is exactly the
+    window `collect/twoarm.py` actually watched and wrote down. A float bounds
+    at `start_ts + that many seconds`. Either makes a pair that had not
+    recovered by the end of its own observation window come back censored
+    (NOT_RECOVERED / STILL_DEGRADED) -- which is the truth about it -- instead
+    of borrowing a recovery instant from the next pair.
+    """
+    if window_seconds is None:
+        return None
+    t0 = p["start_ts"]
+    if window_seconds == "trail":
+        end = p.get("end_ts")
+        trail = pd.to_numeric(pd.Series([p.get("trail_s")]), errors="coerce").iloc[0]
+        if pd.isna(trail) or end is None or pd.isna(end):
+            return None                       # pre-`trail_s` pairs.csv: no bound
+        return end + pd.Timedelta(seconds=float(trail))
+    return t0 + pd.Timedelta(seconds=float(window_seconds))
+
+
 def measure(pairs: pd.DataFrame, health: pd.DataFrame,
             hold_seconds: float = HOLD_SECONDS,
-            skew_tolerance: float = SKEW_TOLERANCE_SECONDS) -> pd.DataFrame:
+            skew_tolerance: float = SKEW_TOLERANCE_SECONDS,
+            window_seconds: float | str | None = None) -> pd.DataFrame:
     """One row per (pair, arm). The pairs file has two rows per `pair_id`, one
     per arm, which is what makes the comparison paired rather than two
     independent campaigns compared after the fact.
+
+    `window_seconds` closes the measurement window -- see `pair_window_hi` for
+    why the default leaves it open and why `"trail"` is the honest setting.
     """
     rows = []
     for _, p in pairs.iterrows():
@@ -378,8 +435,9 @@ def measure(pairs: pd.DataFrame, health: pd.DataFrame,
                 "produces an outage or a degradation before it can be measured.")
 
         t0 = p["start_ts"]
+        hi = pair_window_hi(p, window_seconds)
         baseline = _slice(health, p["arm"], p["workload"], hi=t0)
-        window = _slice(health, p["arm"], p["workload"], lo=t0)
+        window = _slice(health, p["arm"], p["workload"], lo=t0, hi=hi)
         if kind == OUTAGE:
             res = outage_outcome(window, t0, hold_seconds)
         else:
@@ -830,7 +888,12 @@ def attest_counterfactual_available(decisions: pd.DataFrame | None,
     Never ok. The best case is `ok=True` meaning a log exists to read, which is
     still not a measured recovery and must never be rendered as one.
     """
-    where = str(decisions_path) if decisions_path else "data/decisions/log.csv"
+    # Not a literal. `control/controller.py` anchored LOG_FILE to REPO_ROOT on
+    # 2026-10-13, deliberately without a cwd-relative fallback, so a relative
+    # copy here would name a path the controller never writes -- and this
+    # attestation's whole job is to say WHERE it looked when it found nothing.
+    from control.controller import LOG_FILE
+    where = str(decisions_path) if decisions_path else str(LOG_FILE)
     if decisions is None or not len(decisions):
         return Attestation(
             "counterfactual-available", False,
@@ -971,11 +1034,20 @@ def render(per_fault: pd.DataFrame, deltas: pd.DataFrame,
 
 
 def main() -> None:
+    # Imported rather than spelled out. `LOG_FILE` is anchored to the repo root
+    # (control/controller.py, 2026-10-13) with NO cwd-relative fallback, so a
+    # relative default here would make an eval run from any directory but the
+    # repo root read an empty decision log, find nothing, and report as though
+    # no decisions had been made -- a silent zero that reads like a result.
+    # dashboard/terminal.py imports it for the same reason. Cheap and
+    # cluster-free: controller's `kubernetes` import is lazy.
+    from control.controller import LOG_FILE
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--indir", default="data/twoarm",
                     help="where collect/twoarm.py wrote pairs.csv and health.csv")
-    ap.add_argument("--decisions", default="data/decisions/log.csv")
+    ap.add_argument("--decisions", default=str(LOG_FILE))
     ap.add_argument("--out", default="eval/recovery-results.csv")
     args = ap.parse_args()
 

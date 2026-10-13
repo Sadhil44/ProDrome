@@ -10,6 +10,18 @@ Metric scraper, chaos runner, load generation. Owned by Shaurya — see [SETUP.m
 | `load/run-load.sh` | 4 | Diurnal load against all 6 workloads (prodrome + control). `DAYS=84` ≈ 14h. See `load/README.md`. |
 | `chaos.py` | 5 | Inject CPU_HOG / MEMORY_LEAK / DISK_STRESS / POD_KILL via `kubectl exec … stress-ng`; write `data/chaos/labels.csv`. `--campaign` or `--one`. |
 | `twoarm.py` | 7 | Control arm: inject the **same** fault into `prodrome` and `control` simultaneously, sample both arms' serving health. Writes `data/twoarm/{pairs,health}.csv`. `--preflight`, `--campaign`, `--one`, `--settle-gate`, `--order rotate`. Measured by [`eval/recovery.py`](../eval/README.md). |
+| `poscontrol.py` | 7 | **Positive control.** Takes both arms down together and brings **one** back a chosen number of seconds later, so the per-pair delta is known by construction and the collection path can be checked against it. Writes `data/twoarm-poscontrol/`. `--preflight`, `--campaign --sizes 0,10,30 --repeats 4`, `--hurt-arm prodrome`, `--restore-only`. |
+
+> **`poscontrol.py` is a test of the instrument, never a Prodrome result.** The
+> difference it measures is one it created itself, by holding one namespace's
+> deployment at zero replicas longer than the other's. It never reads or writes
+> `control/`, `DRY_RUN` stays `True`, and the rows are written with
+> `fault_type=POSITIVE_CONTROL` — which has no row in `control/policy.py`, so
+> `eval.recovery.lever_for` resolves it to `nothing` and every table marks it
+> `comparable=False`. They also go to their own directory so they cannot be
+> swept into `data/twoarm/` by accident. The replay-only counterpart, which
+> tests the analysis half without a cluster, is
+> [`eval/sensitivity.py`](../eval/README.md).
 
 `--settle-gate` waits for **both** arms to be Ready and restart-stable before
 each pair, so a pod still in CrashLoopBackOff from the last fault cannot be

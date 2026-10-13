@@ -246,9 +246,35 @@ def test_probe_that_never_leaves_the_band_is_no_degradation():
 def test_recovery_kind_covers_exactly_the_four_fault_types():
     """Every fault type the chaos runner can inject has to declare which
     quantity it produces. A fault with no entry raises rather than silently
-    picking one."""
-    assert set(recovery.RECOVERY_KIND) == {"CPU_HOG", "MEMORY_LEAK",
-                                           "DISK_STRESS", "POD_KILL"}
+    picking one.
+
+    RECOVERY_KIND also carries POSITIVE_CONTROL, which is not a fault and which
+    collect/chaos.py cannot inject -- collect/poscontrol.py manufactures an
+    outage of a chosen length to test the harness's sensitivity. The injectable
+    set is pinned separately so adding a measurement mode cannot quietly add a
+    fault type.
+    """
+    assert recovery.CHAOS_FAULT_TYPES == {"CPU_HOG", "MEMORY_LEAK",
+                                          "DISK_STRESS", "POD_KILL"}
+    assert set(recovery.RECOVERY_KIND) == (
+        set(recovery.CHAOS_FAULT_TYPES) | {"POSITIVE_CONTROL"})
+
+
+def test_positive_control_can_never_be_read_as_a_prodrome_win():
+    """The manufactured-effect fault type must be marked not-comparable.
+
+    collect/poscontrol.py produces pairs whose difference it created itself. If
+    `lever_for` ever resolved POSITIVE_CONTROL to a real lever, those rows would
+    come out of `per_fault_arm_table` flagged `comparable=True` and a reader
+    seeing only the table would read a manufactured win as a result.
+    """
+    assert recovery.lever_for("POSITIVE_CONTROL") == "nothing"
+    h = pd.concat([health(a, "redis", [True] * 4 + [False] * 6 + [True] * 10)
+                   for a in (TREATMENT_ARM, CONTROL_ARM)], ignore_index=True)
+    m = recovery.measure(pair("POSCTL_c000s_001", "POSITIVE_CONTROL"), h)
+    assert set(m["kind"]) == {"outage"}
+    t = recovery.per_fault_arm_table(m)
+    assert not t["comparable"].any()
 
 
 def test_measure_raises_on_an_undeclared_fault_type():
