@@ -51,10 +51,17 @@ KNOWN_UNENFORCED = {
         "crosstalk rather than edited from here. What the script actually "
         "checks is NOT unenforced: tests/test_units.py's "
         "test_a_restart_is_suppressed_for_the_full_window_and_then_lifts is the "
-        "fresh-clone counterpart and does run in CI; the only half it omits (that "
-        "the restart shape WOULD fire without on_restart) does not hold through "
-        "update() on any data, synthetic or real, which is a finding about the "
-        "script, not a gap in the suite.",
+        "fresh-clone counterpart and does run in CI. The one half it omits -- "
+        "that the restart shape WOULD fire without on_restart -- is a coverage "
+        "gap worth closing, NOT a reason to exclude this file: the exclusion "
+        "rests entirely on the zero test_ functions above and would still stand "
+        "if that half were fully covered. (The old reason claimed that half "
+        "'does not hold through update() on any data, synthetic or real'. That "
+        "was true of the pre-fix MetricDetector, which appended each tick's "
+        "error to the reference BEFORE scoring against it and so could not fire "
+        "on a step change of any magnitude. ml/detector.py:135-146 now scores "
+        "first and folds the error in afterwards, only when the tick looked "
+        "healthy, so the arithmetic that made the claim true is gone.)",
 }
 
 # Files whose excuse above is "it defines no test_ functions". That reason is the

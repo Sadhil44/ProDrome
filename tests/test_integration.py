@@ -318,9 +318,13 @@ def test_the_writer_and_the_reader_agree_on_where_the_decision_log_lives():
     asserting more than the contract says. It now pins the two halves of the
     contract that are actually load-bearing -- the path is called
     data/decisions/log.csv, and the writer and the reader name the same file --
-    and leaves the anchoring free. `REPO_ROOT / "data" / "decisions" / "log.csv"`
-    satisfies this; so does today's relative value. The gap between them is the
-    strict xfail below, which is where that finding lives.
+    and leaves the anchoring free. Today's anchored
+    `REPO_ROOT / "data" / "decisions" / "log.csv"` satisfies this, and so would a
+    bare relative value -- which is why the anchoring is asserted separately, by
+    test_the_decision_log_is_the_same_file_wherever_the_controller_was_started
+    below. That test is not an xfail and does not fail: cluster anchored
+    LOG_FILE to the repo root, so it is a plain passing assertion that the
+    resolved path does not move with the process's working directory.
     """
     assert controller.LOG_FILE.parts[-3:] == ("data", "decisions", "log.csv"), (
         f"SETUP.md §8 names data/decisions/log.csv; the controller writes "
@@ -396,8 +400,10 @@ def test_the_cooldown_leases_follow_the_decision_log_they_are_derived_from(live_
     leases were ever given their own constant, every test here that redirects
     LOG_FILE would start writing real lease files into the developer's working
     tree and reading each other's cooldowns, and the first symptom would be
-    flakiness in an unrelated test. Also the guarantee that the fix requested in
-    the xfail above does not quietly change what these fixtures isolate.
+    flakiness in an unrelated test. Also the guarantee that the cwd-anchoring of
+    LOG_FILE asserted above, by
+    test_the_decision_log_is_the_same_file_wherever_the_controller_was_started,
+    does not quietly change what these fixtures isolate.
     """
     assert live_controller.cooldown_dir() == live_controller.LOG_FILE.parent / "cooldowns"
 

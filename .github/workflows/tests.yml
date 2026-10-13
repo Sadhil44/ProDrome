@@ -90,12 +90,17 @@ jobs:
       # project decision on crosstalk/decisions). Turning those strict here would
       # convert a recorded finding into a red build.
       #
-      # Strictness is opted into per test instead. tests/test_integration.py has
-      # two `@pytest.mark.xfail(strict=True)` findings -- the relative LOG_FILE
-      # and the placeholder NORMAL/1.0 prediction -- because each is a plain
-      # defect with no judgement call in it, so an XPASS meaning "somebody fixed
-      # it" should go red and get the marker deleted. The global switch cannot
-      # make that distinction, which is why it stays off.
+      # Strictness is opted into per test instead. The guarantee, which holds
+      # whatever the current count is: a finding in tests/ that is a plain defect
+      # with no judgement call in it is recorded as
+      # `@pytest.mark.xfail(strict=True)`, so an XPASS meaning "somebody fixed
+      # it" goes red and the marker gets deleted rather than lingering as a lie.
+      # That is how the findings tests/test_integration.py used to carry -- the
+      # relative LOG_FILE and the placeholder NORMAL/1.0 prediction -- were
+      # retired: both were fixed, both markers were deleted, and the file now
+      # asserts the fixed behaviour directly instead. The global switch cannot
+      # tell those apart from the deliberate non-strict ones above, which is why
+      # it stays off.
       - name: Run the contract suite
         run: >
           python -m pytest -q
