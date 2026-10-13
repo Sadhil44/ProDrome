@@ -67,10 +67,35 @@ jobs:
       # tests/test_ci_enforcement.py fails and tells you -- that is what it is
       # for, so the list cannot rot into a silent gap.
       #
+      # collect/test_twoarm.py and eval/test_recovery.py joined on 2026-10-12.
+      # They were held out of the gate while collect/ and eval/ were mid-campaign
+      # -- not because they failed, but because making a file that is being
+      # rewritten under us a merge gate turns one seat's work-in-progress into
+      # everyone's red build. The campaign landed, so the reason expired and the
+      # KNOWN_UNENFORCED entries went with it. They add 84 tests and about 10s.
+      # Their import surface is already covered by the install list above:
+      # pandas, pytest and stdlib only. Neither reads data/ -- collect's fakes
+      # are injected callables and eval's frames are built in-process -- which is
+      # what makes them enforceable from a fresh clone at all, where data/twoarm/
+      # and data/chaos/ do not exist. Verified by running this exact invocation
+      # against a copy of the tree with data/samples/ as its only data.
+      #
+      # NOT added: ml/test_restart_suppression.py. It defines no test_ functions
+      # (it is a main() script), so naming it here would collect zero tests and
+      # report green while asserting nothing -- worse than the documented gap.
+      # See KNOWN_UNENFORCED in tests/test_ci_enforcement.py.
+      #
       # No pytest.ini / xfail_strict: control/test_policy_gates.py marks two
       # findings non-strict on purpose (the fix is a threshold value, which is a
       # project decision on crosstalk/decisions). Turning those strict here would
       # convert a recorded finding into a red build.
+      #
+      # Strictness is opted into per test instead. tests/test_integration.py has
+      # two `@pytest.mark.xfail(strict=True)` findings -- the relative LOG_FILE
+      # and the placeholder NORMAL/1.0 prediction -- because each is a plain
+      # defect with no judgement call in it, so an XPASS meaning "somebody fixed
+      # it" should go red and get the marker deleted. The global switch cannot
+      # make that distinction, which is why it stays off.
       - name: Run the contract suite
         run: >
           python -m pytest -q
@@ -80,3 +105,5 @@ jobs:
           ml/test_explain.py
           ml/test_scale_sensitivity.py
           ml/test_abstention.py
+          collect/test_twoarm.py
+          eval/test_recovery.py

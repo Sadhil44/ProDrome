@@ -19,8 +19,17 @@ until 2026-10-06 none of them ran on a push. `.github/workflows/tests.yml` now r
 ```bash
 python -m pytest -q tests \
   control/test_safety_rails.py control/test_policy_gates.py \
-  ml/test_explain.py ml/test_scale_sensitivity.py
+  ml/test_explain.py ml/test_scale_sensitivity.py ml/test_abstention.py \
+  collect/test_twoarm.py eval/test_recovery.py
 ```
+
+**313 passed, 2 xfailed, about 70s** as of 2026-10-12, verified from a copy of the tree whose only
+data is `data/samples/` and with no `classifier.pkl` — i.e. what CI actually gets. `collect/` and
+`eval/` joined that day: they were held out while those directories were being rewritten mid-campaign
+(a moving target as a merge gate is one seat's work-in-progress as everyone's red build), the
+campaign landed, and the 84 tests they bring need nothing beyond `pandas` and `pytest`. Neither
+reads `data/` — collect's cluster calls are injected callables and eval's frames are built
+in-process — which is what makes them enforceable from a fresh clone at all.
 
 The files stay where their owners keep them — `tests/CLAUDE.md` says other seats' tests live
 beside their code, so the invocation widened rather than the files moving. The paths are named
@@ -36,9 +45,12 @@ run. That means they read `data/samples/` only, because it is the sole committed
 (`SETUP.md` §5). Ground rule 8 says a result that isn't reproducible from a fresh clone
 isn't a result; a test that can't run from a fresh clone isn't a test.
 
-This is why `ml/test_restart_suppression.py` is not part of this suite — it reads
-`data/healthy/metrics.parquet`, which is gitignored, so it cannot run for anyone who
-hasn't received a collection handoff.
+This is why `ml/test_restart_suppression.py` is not part of this suite. It is also why naming it
+in the workflow would not help: it defines no `test_` functions at all — it is a `main()` script —
+so CI would collect zero tests from it and report green. Its `main()` reads
+`data/healthy/metrics.parquet`, which is gitignored and so absent from the clone CI builds, even
+though it exists on machines that have had a collection handoff. `test_units.py` carries the
+fresh-clone counterpart of what it checks.
 
 ## What is covered, and why each one exists
 

@@ -39,7 +39,6 @@ import csv
 import importlib
 import sys
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
@@ -49,7 +48,7 @@ from dashboard import terminal
 from ml.detector import Detector
 from ml.features import METRICS, WINDOW_SIZE, windows
 
-from conftest import ACTION_VOCABULARY, DECISION_LOG_COLUMNS
+from conftest import ACTION_VOCABULARY, DECISION_LOG_COLUMNS, REPO_ROOT, StubClassifier
 
 
 class SpyAppsApi:
@@ -307,10 +306,114 @@ def test_the_writer_and_the_reader_agree_on_where_the_decision_log_lives():
     Deliberately takes no fixture. `live_controller` redirects LOG_FILE to a
     temporary, so this assertion made inside it would be checking the test's own
     setup rather than the committed value.
+
+    This asserted `controller.LOG_FILE == Path("data/decisions/log.csv")` until
+    2026-10-12, which pinned the literal rather than the contract and blocked a
+    fix: cluster anchored STOP_FILE to the repo root after finding that a
+    controller started from anywhere but the repo root got a kill switch that
+    silently did nothing, could not give LOG_FILE the same treatment, and said so
+    in its handoff -- "tests/test_integration.py:311 asserts ... and tests/ is
+    not mine." SETUP.md §8 names a FILE IN THIS REPO, not a string to resolve
+    against whatever directory an operator was standing in, so the equality was
+    asserting more than the contract says. It now pins the two halves of the
+    contract that are actually load-bearing -- the path is called
+    data/decisions/log.csv, and the writer and the reader name the same file --
+    and leaves the anchoring free. `REPO_ROOT / "data" / "decisions" / "log.csv"`
+    satisfies this; so does today's relative value. The gap between them is the
+    strict xfail below, which is where that finding lives.
     """
-    assert controller.LOG_FILE == Path("data/decisions/log.csv")
+    assert controller.LOG_FILE.parts[-3:] == ("data", "decisions", "log.csv"), (
+        f"SETUP.md §8 names data/decisions/log.csv; the controller writes "
+        f"{controller.LOG_FILE}"
+    )
     assert terminal.DECISIONS_LOG == controller.LOG_FILE, (
         "the dashboard reads a path the controller does not write"
+    )
+    # Equality of two Path objects is not yet agreement about a file: while the
+    # value is relative, "the same path" means "the same path RELATIVE TO EACH
+    # PROCESS'S CWD", and the dashboard is routinely run from a second terminal.
+    # Trivially true today because this is one process; it is here so that it
+    # keeps being checked once the value is anchored and the two can differ.
+    assert terminal.DECISIONS_LOG.resolve() == controller.LOG_FILE.resolve()
+
+
+@pytest.mark.xfail(
+    reason="LOG_FILE is still Path('data/decisions/log.csv'), relative, so it "
+           "resolves against the working directory. Raised with cluster on "
+           "crosstalk/questions 2026-10-12; control/controller.py is cluster's "
+           "file. Strict: when it is anchored this XPASSes, which is the signal "
+           "to delete the marker rather than to leave a stale note behind.",
+    strict=True,
+)
+def test_the_decision_log_is_the_same_file_wherever_the_controller_was_started(
+    tmp_path, monkeypatch
+):
+    """The defect the assertion above used to pin in place.
+
+    Same shape as the STOP bug cluster fixed on 2026-10-12: a constant written as
+    a relative Path is not a location, it is a location *plus* an assumption
+    about the working directory, and nothing in the process checks that
+    assumption. `startup_report()` prints LOG_FILE resolved, which makes it
+    visible to someone who reads the startup banner, but visible is not the same
+    as correct.
+
+    Three consequences, in increasing order of how much they matter:
+
+    1. The audit trail. A controller started from elsewhere writes
+       data/decisions/log.csv under THAT directory, and the dashboard started
+       from the repo root reads the repo's copy and renders "waiting for
+       decisions" -- the exact failure that
+       test_the_writer_and_the_reader_agree_on_where_the_decision_log_lives
+       exists to prevent, except that aliasing the constant cannot prevent this
+       half of it. Two processes holding the same relative Path still read and
+       write two different files.
+    2. The eval harness. `eval/recovery.py --decisions` defaults to the same
+       relative string, so a run from a different directory silently scores an
+       empty or stale log instead of failing.
+    3. The cooldown. `cooldown_dir()` is `LOG_FILE.parent / "cooldowns"`, so the
+       cross-process lease namespace is cwd-dependent too. Two controllers
+       started from different directories share no cooldown and no rate-limit
+       budget, each believes it is within budget, and every row in both logs
+       reads `executed`. That is a safety rail failing OPEN and silently, which
+       is a strictly worse outcome than a lost audit trail -- and it is the same
+       argument cluster already accepted for STOP.
+
+    Unlike STOP, this should NOT also honour a cwd-relative copy. A kill switch
+    fails safe by stopping, so "any of these files" is right for it; a log that
+    is written in two places at once is just a split audit trail, and the rails
+    reading a split lease directory is the failure in (3). One anchored location.
+    """
+    repo_root_answer = controller.LOG_FILE.resolve()
+    monkeypatch.chdir(tmp_path)
+    elsewhere_answer = controller.LOG_FILE.resolve()
+
+    assert elsewhere_answer == repo_root_answer, (
+        f"the decision log is {repo_root_answer} when the controller is started "
+        f"from the repo root and {elsewhere_answer} when it is started from "
+        f"{tmp_path} -- an operator gets an audit trail nobody reads, the "
+        f"dashboard shows nothing, and cooldown_dir() splits the lease namespace "
+        f"with it so two controllers share no rail"
+    )
+
+
+def test_the_cooldown_leases_follow_the_decision_log_they_are_derived_from(live_controller):
+    """`cooldown_dir()` is `LOG_FILE.parent / "cooldowns"`, and cluster chose that
+    derivation specifically so this file's fixtures isolate the leases for free.
+
+    Pinned because it is a cross-seat assumption that nothing else states: if the
+    leases were ever given their own constant, every test here that redirects
+    LOG_FILE would start writing real lease files into the developer's working
+    tree and reading each other's cooldowns, and the first symptom would be
+    flakiness in an unrelated test. Also the guarantee that the fix requested in
+    the xfail above does not quietly change what these fixtures isolate.
+    """
+    assert live_controller.cooldown_dir() == live_controller.LOG_FILE.parent / "cooldowns"
+
+    live_controller.record_action("nginx")
+    written = sorted(p.name for p in live_controller.cooldown_dir().iterdir())
+    assert written == ["nginx.lease"], f"leases landed elsewhere: {written}"
+    assert REPO_ROOT not in live_controller.cooldown_dir().resolve().parents, (
+        "a test just wrote a cooldown lease inside the repo"
     )
 
 
@@ -407,4 +510,118 @@ def test_the_dashboard_reads_the_decision_log_columns_the_contract_names(live_co
     caption = str(getattr(degraded, "caption", "") or "")
     assert "mode" in caption and "top_features" in caption, (
         "a missing decision-log column renders as blanks instead of being reported"
+    )
+
+
+# --- a placeholder presented as a prediction ---------------------------------
+
+class AlwaysFiringDetector:
+    """A detector that fires on every tick, so the branch under test is reached.
+
+    The real detector's firing depends on history and on the data; the question
+    here is what the controller logs ONCE it has fired, so firing is made a
+    given rather than arranged.
+    """
+
+    def __init__(self, score: float = 4.2):
+        self.score_value = score
+
+    def score(self, workload, values):
+        return self.score_value, True
+
+
+def _one_tick():
+    return {metric: 1.0 for metric in METRICS}
+
+
+def _history(depth):
+    return [[1.0] * len(METRICS) for _ in range(depth)]
+
+
+@pytest.mark.xfail(
+    reason="evaluate_once() initialises predicted_class, confidence = "
+           "('NORMAL', 1.0) and logs that pair on a fired tick whose history is "
+           "shorter than WINDOW_SIZE, without calling the classifier. Raised by "
+           "cluster, confirmed here, posted to crosstalk/questions for diagnosis "
+           "and cluster 2026-10-12. Strict: when a row that no classifier "
+           "produced stops claiming a prediction, this XPASSes and the marker "
+           "comes off rather than rotting into a comment.",
+    strict=True,
+)
+def test_a_decision_row_never_reports_a_prediction_no_classifier_made(live_controller):
+    """SETUP.md §7 gives the decision log `predicted_class` and `confidence`, and
+    the dashboard and the eval harness read it by name. A row may only fill those
+    cells with something a model actually returned.
+
+    The defect: `evaluate_once` seeds `predicted_class, confidence = ("NORMAL",
+    1.0)` before the gate, and on a fired tick with fewer than WINDOW_SIZE ticks
+    of history -- which is every tick of the first five minutes after any
+    controller start, and after every restart -- it falls through to
+    `log_decision` with those values untouched. `classifier.calls` is 0. The row
+    says NORMAL at confidence 1.0.
+
+    Why that is not merely untidy: the two rows this test writes are produced by
+    two completely different paths -- one where the shipped model was asked and
+    answered, one where it was never loaded -- and they are IDENTICAL in every
+    column except `ts`. Same fired, same detector_score, same predicted_class,
+    same confidence, same action, same result, same mode. An operator looking at
+    the dashboard sees "NORMAL 1.00" and reads it as the model being certain
+    nothing is wrong, at the exact moment the model has not been consulted at
+    all. Anyone computing diagnosis accuracy or a confidence distribution over
+    this column counts warm-up rows as perfect-confidence NORMAL predictions,
+    which is the one value that most flatters the model.
+
+    `result="abstained"` does not rescue it. Cluster introduced `abstained`
+    precisely because `not-fired` on a `fired=True` row was two columns
+    contradicting each other, and it covers three different things at once:
+    below the confidence floor, an unmapped class, and not enough history. The
+    first two are the model's answer; the third is its absence. The column
+    cannot tell them apart, and `policy.decide("NORMAL", 1.0)` returns "nothing"
+    too, so `action` cannot either.
+
+    Deliberately asserts DISCRIMINABILITY rather than an encoding. The fix is
+    control/controller.py's and ml/classifier.py's to choose -- empty cells, a
+    sentinel class outside the model's label space, an empty confidence, a
+    `predicted_class` of "" with the reason carried in `result` -- and this test
+    passes for any of them. Pinning a particular spelling here would be
+    renegotiating someone else's contract rather than asserting it. What it will
+    not accept is the two rows staying interchangeable. "UNKNOWN" would be the
+    one wrong answer, since policy.py already uses it for "the model answered,
+    below the floor"; see the note on crosstalk.
+    """
+    detector = AlwaysFiringDetector()
+
+    asked = StubClassifier("NORMAL", 1.0)
+    live_controller.evaluate_once(
+        SpyAppsApi(), "nginx", _one_tick(), detector, asked, _history(WINDOW_SIZE),
+    )
+    assert asked.calls == 1, "the full-history branch did not consult the classifier"
+
+    never_asked = StubClassifier("NORMAL", 1.0)
+    live_controller.evaluate_once(
+        SpyAppsApi(), "nginx", _one_tick(), detector, never_asked, _history(WINDOW_SIZE - 1),
+    )
+    assert never_asked.calls == 0, (
+        "the short-history branch consulted the classifier; this test no longer "
+        "describes the situation it was written for"
+    )
+
+    with live_controller.LOG_FILE.open(newline="") as f:
+        header, genuine_row, placeholder_row = list(csv.reader(f))
+    genuine = dict(zip(header, genuine_row))
+    placeholder = dict(zip(header, placeholder_row))
+
+    assert genuine["fired"] == placeholder["fired"] == "True"
+
+    prediction_cells = ("predicted_class", "confidence", "top_features")
+    assert any(genuine[c] != placeholder[c] for c in prediction_cells), (
+        "a fired tick with too little history logged "
+        f"predicted_class={placeholder['predicted_class']!r} "
+        f"confidence={placeholder['confidence']!r} without ever calling the "
+        "classifier, which is byte-for-byte what the classifier's own answer "
+        "looks like: "
+        + ", ".join(f"{c}={genuine[c]!r}" for c in prediction_cells)
+        + ". The log cannot distinguish a confident NORMAL from a question "
+          "nobody asked, and every reader of that column is counting the "
+          "placeholder as a prediction."
     )

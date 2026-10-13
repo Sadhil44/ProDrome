@@ -22,9 +22,18 @@ to prove the pipeline does what it claims — and to make a broken claim fail lo
 - **Every test earns its place with a real defect or a stated rule.** No speculative coverage. Each
   one should map to a ground rule in `SETUP.md` §10, a published contract, or a bug that actually
   happened — and say which in a docstring, so a future reader knows whether it still matters.
-- **A test that cannot run is not a test.** `ml/test_restart_suppression.py` reads
-  `data/healthy/metrics.parquet`, which is gitignored, so it is excluded from the suite and cannot
-  run for anyone without a data handoff. Giving it a synthetic fallback is real work worth doing.
+- **A test that cannot run is not a test** — and a test file that runs but asserts nothing is
+  worse, because it reports green. `ml/test_restart_suppression.py` is both: it defines no `test_`
+  functions (it is a `main()` script), and its `main()` reads `data/healthy/metrics.parquet`, which
+  is gitignored and therefore absent from the fresh clone CI runs from — present on a developer
+  machine after a collection handoff is not the same thing. The synthetic fallback that mattered
+  has been written: `tests/test_units.py`'s
+  `test_a_restart_is_suppressed_for_the_full_window_and_then_lifts` is the fresh-clone counterpart
+  and does run in CI. The half it omits — that the restart shape *would* have fired without
+  `on_restart()` — does not hold through `update()` on any data, synthetic or real, so it is a
+  finding about the script rather than a gap here. Both remaining halves are signal's to fix;
+  `tests/test_ci_enforcement.py` records the reason and now checks the "no `test_` functions" part
+  of it rather than trusting it.
 - **CI installs only what the suite imports**, not `requirements.txt` — that would pull ~2 GB of
   torch for `ml/cnn.py` which no test touches. If a new test needs another package, add it to the
   workflow explicitly and say why.
