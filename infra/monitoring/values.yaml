@@ -1,0 +1,111 @@
+# kube-prometheus-stack values for the Prodrome kind cluster.
+#
+# This file exists because the monitoring stack previously existed ONLY as a
+# helm command pasted into docs/guides/shaurya.md section 2.1. A command in a
+# guide is not infrastructure: nothing in the repo could tell you whether the
+# cluster you are looking at matches the cluster the data came from, and on
+# 2026-10-12 the `monitoring` namespace turned up empty with `helm list -A`
+# returning nothing and no way to tell what had been lost. infra/CLAUDE.md
+# already said why that was not allowed -- "nothing that only exists as a
+# kubectl command someone ran once is reproducible from a fresh clone, and if
+# it is not reproducible it is not a result". The stack is now declarative and
+# committed, like the workloads.
+#
+# Every value below is load-bearing for the frozen metric contract (SETUP.md
+# section 7, collect/README.md's frozen query list). Changing one changes the
+# data, so change one and say so on cluster/interfaces labeled collect.
+
+# --- the two settings the data contract depends on ---------------------------
+prometheus:
+  prometheusSpec:
+    # 15s, matching STEP_SECONDS in collect/scrape.py and collect/baseline.py
+    # and the 15s tick in SETUP.md section 7. A different scrape interval does
+    # not merely change resolution: every frozen query uses rate(...[1m]), and
+    # a [1m] range vector over a coarser scrape is a different estimator with
+    # the same name.
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # 7d, as collect/scrape.py's error message already assumes ("Prometheus
+    # retention (7d)?"). Retention is the entire reason scrape.py can ask for a
+    # window AFTER the fact instead of polling live -- a chaos run that crashes
+    # at 3am costs nothing because the data is still there in the morning. The
+    # absence of any retention window is what forced the healthy baseline to be
+    # polled live.
+    retention: 7d
+    # A disposable kind cluster sits on a laptop. Size is the backstop that
+    # keeps a long campaign from filling the disk before the 7 days are up;
+    # whichever limit is hit first wins.
+    retentionSize: 4GB
+
+    # Keep the footprint predictable on a 3-node kind cluster that is also
+    # running the workloads under test. Prometheus competing for memory with
+    # the workloads would perturb the very metrics it is collecting.
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+
+    # Default is a 10GiB emptyDir-backed local volume; on kind that is the
+    # node's disk and it does not survive a `kind delete cluster`. That is
+    # correct and deliberate -- the cluster is disposable (infra/CLAUDE.md) and
+    # the durable artifact is the exported Parquet, not the TSDB. Export before
+    # you delete.
+
+# --- what we deliberately do not run -----------------------------------------
+# Not a cost saving. Each of these is either not a source of the eight frozen
+# metrics or does not work on kind, and a permanently-down scrape target
+# teaches everyone to ignore a red target list, which is how a genuinely
+# missing exporter goes unnoticed.
+
+grafana:
+  # We read Prometheus with PromQL from collect/scrape.py and present results
+  # in dashboard/terminal.py. A second UI is a second thing to keep alive.
+  enabled: false
+
+alertmanager:
+  # Prodrome IS the alerting experiment. Routing a second, unrelated alerting
+  # path through the same cluster muddies what fired and why.
+  enabled: false
+
+# kind runs these control-plane components bound to 127.0.0.1 inside the
+# control-plane container, so their ServiceMonitors can never be scraped and
+# show as permanently down. None of them feed the eight metrics.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+# --- what we must keep -------------------------------------------------------
+kubeStateMetrics:
+  # NOT optional. `mem_pct` is a join against
+  # kube_pod_container_resource_limits, which comes from here and nowhere else,
+  # and `restarts` comes from kube_pod_container_status_restarts_total. When
+  # this component went missing, collect/baseline.py had to reconstruct the
+  # limit from the pod spec by hand. Keep it on.
+  enabled: true
+
+prometheus-node-exporter:
+  # Node-level metrics. Not one of the eight (all eight are per-container, from
+  # cAdvisor in the kubelet, plus kube-state-metrics), but it is what tells you
+  # whether a workload's numbers moved because of the fault or because the
+  # whole node was saturated. Cheap, and the question comes up every campaign.
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+# The kubelet ServiceMonitor is what scrapes cAdvisor. It is the single most
+# important target in this stack -- seven of the eight metrics come through it
+# -- and it is on by default. It is named here so that a future edit that turns
+# things off cannot reach it by accident.
+kubelet:
+  enabled: true
+  serviceMonitor:
+    cAdvisor: true

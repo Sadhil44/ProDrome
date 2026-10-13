@@ -46,7 +46,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import random
+import shlex
 import subprocess
 import sys
 import time
@@ -98,8 +100,28 @@ def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
+# How to invoke kubectl. SETUP.md section 1 says Windows users run everything
+# inside WSL2, and on this project's Windows host that is literally required:
+# the kubeconfig lives at ~/.kube/config INSIDE WSL, there is no Windows
+# kubeconfig at all, so a bare `kubectl` from PowerShell or Git Bash silently
+# falls back to localhost:8080 and every call fails with a connection refused
+# that looks like a dead cluster rather than a missing config.
+#
+# `wsl.exe -e kubectl` (no shell) is the right form: -e execs the binary
+# directly, so arguments carrying spaces -- the jsonpath expressions below, and
+# `sh -c "cat ..."` in container_mem_pct -- pass through untouched. Routing
+# through `wsl.exe -e bash -lc` would re-parse them and break both.
+#
+# Override with PRODROME_KUBECTL when the default is wrong (a remote cluster, a
+# different WSL distro, kubectl already native on PATH):
+#     PRODROME_KUBECTL="kubectl" python collect/twoarm.py --preflight
+KUBECTL_CMD = shlex.split(
+    os.environ.get("PRODROME_KUBECTL",
+                   "wsl.exe -e kubectl" if sys.platform == "win32" else "kubectl"))
+
+
 def _kubectl(*args: str, timeout: float = 60, check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(["kubectl", *args], capture_output=True, text=True,
+    return subprocess.run([*KUBECTL_CMD, *args], capture_output=True, text=True,
                           timeout=timeout, check=check)
 
 

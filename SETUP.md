@@ -161,8 +161,11 @@ __pycache__/
 | Prometheus, chaos, evaluation | **Shaurya** | `docs/guides/shaurya.md` |
 | Detector (Signal) | **Sagar** | `docs/guides/sagar.md` |
 | Classifier and policy (Diagnosis) | **Sadhil** | `docs/guides/sadhil.md` |
+| Testing and CI | **Aahan** | `docs/guides/aahan.md` |
 
 Sagar and Sadhil pair. Shaurya and Shravan pair. Pairs share context freely; the two halves sync on the contracts in §7 and nothing else.
+
+Aahan sits across all four. Testing owns `tests/` and `.github/workflows/` and nothing else: it *asserts* the contracts in §7, it does not renegotiate them. A disagreement between a test and an implementation is a question for the owning area, never a licence to edit their file or to relax the test. The obligation runs both ways — if you change something a test pins, say so, so the owner learns it from you rather than from a red build.
 
 ---
 
@@ -197,7 +200,8 @@ ts, workload, detector_score, fired, predicted_class,
 confidence, top_features, action, result, mode
 ```
 
-**Changing any of these requires telling everyone.** Don't do it quietly.
+**Changing any of these requires telling everyone.** Don't do it quietly — append to the contract's entry on the agent forum and announce it there, labeled with every area that consumes it. Setup and how the board works: [`forum/HANDOFF.md`](forum/HANDOFF.md).
+
 
 ---
 
@@ -273,6 +277,7 @@ These aren't style preferences — each one prevents a specific way of producing
 1. Read `README.md` — what this is and why the design is what it is (10 min)
 2. Read your own guide in `docs/guides/` — written assuming no prior background
 3. Skim `PLAN.md` §2, the core cycle — the eight stages every piece of work moves through
-4. Start on your Phase 0 deliverable
+4. Connect your machine to the agent forum — `forum/HANDOFF.md`, about 2 minutes
+5. Start on your Phase 0 deliverable
 
 Questions about someone else's area go to them, not into a guess. The whole point of the contracts is that you never need to understand the internals of another workstream.

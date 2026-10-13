@@ -9,6 +9,7 @@ Run: python -m ml.train
 """
 
 import argparse
+from pathlib import Path
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -24,6 +25,25 @@ FEATURE_SUFFIXES = ("_mean", "_slope", "_std", "_max", "_last")
 # it's reported separately as the near-zero-lead-time honest failure
 # case (docs/guides/shaurya.md Part 5.5), never a classification target.
 NON_CLASSIFIABLE_LABELS = ("NORMAL", "POD_KILL")
+
+# Prefer real chaos-run data over the Phase 0 synthetic fixture, whichever is
+# actually on disk (SETUP.md S8: files, not services). This is the single
+# definition; ml.classifier and ml.abstention both defer to it, so the model
+# that ships and the numbers we report can never come from different datasets.
+# They could before: ml.train defaulted to data/samples/ via argparse while
+# classifier.fit_and_save() preferred data/chaos/, which is how a 0.99
+# synthetic accuracy and a 0.82 real accuracy were both true at once.
+CHAOS_METRICS = Path("data/chaos/metrics.parquet")
+CHAOS_LABELS = Path("data/chaos/labels.csv")
+SAMPLE_METRICS = Path("data/samples/metrics.parquet")
+SAMPLE_LABELS = Path("data/samples/labels.csv")
+
+
+def default_data_paths():
+    """(metrics, labels) to use when the caller did not name any. No side effects."""
+    if CHAOS_METRICS.exists() and CHAOS_LABELS.exists():
+        return CHAOS_METRICS, CHAOS_LABELS
+    return SAMPLE_METRICS, SAMPLE_LABELS
 
 
 def load_labeled_windows(metrics_path="data/samples/metrics.parquet", labels_path="data/samples/labels.csv"):
@@ -47,9 +67,11 @@ def feature_columns(df):
 
 
 def main():
+    default_metrics, default_labels = default_data_paths()
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--metrics", default="data/samples/metrics.parquet")
-    ap.add_argument("--labels", default="data/samples/labels.csv")
+    ap.add_argument("--metrics", default=str(default_metrics))
+    ap.add_argument("--labels", default=str(default_labels))
     args = ap.parse_args()
 
     df = load_labeled_windows(args.metrics, args.labels)

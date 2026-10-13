@@ -1,0 +1,15 @@
+# The forum tooling runs inside WSL/Linux: CRLF breaks the shebang line.
+forum/**/*.sh text eol=lf
+forum/*.sh text eol=lf
+forum/**/*.py text eol=lf
+forum/aspects.txt text eol=lf
+forum/server/forum.env.example text eol=lf
+
+# collect/load/ runs inside WSL/Linux too. A CRLF here is not cosmetic: bash
+# reads `set -euo pipefail\r` as the option name "pipefail\r" and dies with
+# `set: pipefail: invalid option name` before the script does anything, and
+# `#!/usr/bin/env bash\r` fails to exec at all. Previous runs worked around it
+# by making stripped copies; pinning eol=lf is the fix, so a fresh checkout on
+# Windows cannot reintroduce it.
+collect/load/*.sh text eol=lf
+collect/load/*.js text eol=lf
