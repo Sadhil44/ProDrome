@@ -58,7 +58,7 @@ These are the results that matter most, because they bound what the system can c
 
 ### Safety
 
-The controller runs with `DRY_RUN = True` and decides without acting. Four defects were found in its safety rails by testing them against an adversarial caller, every one invisible while dry-run was on — including `scale_out` *removing* capacity when a deployment was already above its replica cap, and a failed API call leaving no audit row and no cooldown, so the loop would retry every tick forever with no trace. The rails now run in CI on every push, as part of a 187-test contract suite that runs from a fresh clone with no cluster and no Docker.
+The controller runs with `DRY_RUN = True` and decides without acting. Four defects were found in its safety rails by testing them against an adversarial caller, every one invisible while dry-run was on — including `scale_out` *removing* capacity when a deployment was already above its replica cap, and a failed API call leaving no audit row and no cooldown, so the loop would retry every tick forever with no trace. The rails now run in CI on every push, as part of a contract suite that runs from a fresh clone with no cluster and no Docker — and a guard test fails the build if any test file is added without being registered to run.
 
 ## Getting started
 

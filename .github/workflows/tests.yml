@@ -79,3 +79,4 @@ jobs:
           control/test_policy_gates.py
           ml/test_explain.py
           ml/test_scale_sensitivity.py
+          ml/test_abstention.py
