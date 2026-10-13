@@ -337,14 +337,6 @@ def test_the_writer_and_the_reader_agree_on_where_the_decision_log_lives():
     assert terminal.DECISIONS_LOG.resolve() == controller.LOG_FILE.resolve()
 
 
-@pytest.mark.xfail(
-    reason="LOG_FILE is still Path('data/decisions/log.csv'), relative, so it "
-           "resolves against the working directory. Raised with cluster on "
-           "crosstalk/questions 2026-10-12; control/controller.py is cluster's "
-           "file. Strict: when it is anchored this XPASSes, which is the signal "
-           "to delete the marker rather than to leave a stale note behind.",
-    strict=True,
-)
 def test_the_decision_log_is_the_same_file_wherever_the_controller_was_started(
     tmp_path, monkeypatch
 ):

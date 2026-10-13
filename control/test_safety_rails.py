@@ -39,6 +39,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 
@@ -51,6 +52,12 @@ from control import policy  # noqa: E402
 from ml.features import METRICS, WINDOW_SIZE  # noqa: E402
 
 CONTROLLER_SOURCE = REPO_ROOT / "control" / "controller.py"
+
+# The COMMITTED value of LOG_FILE, captured at import time -- before the autouse
+# fixture below redirects it at a temporary for every test. Read from the module
+# inside a test it would be the fixture's value, so an assertion about where the
+# real decision log lives has to be made against this.
+COMMITTED_LOG_FILE = controller.LOG_FILE
 
 # Every action the policy table can emit, and the subset that is supposed to
 # touch the cluster. Derived, not hardcoded: a new lever in POLICY becomes a new
@@ -1342,3 +1349,272 @@ def test_no_row_in_the_log_ever_claims_not_fired_while_fired_is_true(live):
             assert row["fired"] == "False", f"contradictory row: {row}"
         if row["fired"] == "False":
             assert row["result"] == "not-fired", f"contradictory row: {row}"
+
+# --- gap 4: the decision log must not be resolved against the working directory
+
+
+def plant_heartbeat(name, age_seconds=0):
+    """A heartbeat belonging to some OTHER controller, `age_seconds` old."""
+    controller.instance_dir().mkdir(parents=True, exist_ok=True)
+    when = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    path = controller.instance_dir() / (quote(name, safe="") + ".alive")
+    path.write_text(when.isoformat())
+    return path
+
+
+def test_the_committed_decision_log_is_anchored_to_the_repo_not_the_cwd():
+    """Asserted against the parsed source as well as the captured value, for the
+    same reason the STOP test is: a relative `Path` is not a location, it is a
+    location plus an assumption about the working directory, and nothing in the
+    process checks that assumption.
+
+    SETUP.md S8 names `data/decisions/log.csv` as a FILE IN THIS REPO. The
+    spelling is unchanged -- the last three parts still read exactly that -- and
+    what is pinned here is what they are relative to.
+    """
+    tree = ast.parse(CONTROLLER_SOURCE.read_text())
+    assigned = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "LOG_FILE" for t in node.targets)
+    ]
+    assert len(assigned) == 1, "LOG_FILE is assigned more or less than once at module scope"
+    value = assigned[0]
+    assert isinstance(value, ast.BinOp), "LOG_FILE is not built from an anchor path"
+    anchors = {node.id for node in ast.walk(value) if isinstance(node, ast.Name)}
+    assert "REPO_ROOT" in anchors, (
+        "LOG_FILE must be anchored to REPO_ROOT, not resolved against the cwd"
+    )
+    assert COMMITTED_LOG_FILE.is_absolute()
+    assert COMMITTED_LOG_FILE.parts[-3:] == ("data", "decisions", "log.csv"), (
+        f"SETUP.md S8 names data/decisions/log.csv; the controller writes "
+        f"{COMMITTED_LOG_FILE}"
+    )
+    assert COMMITTED_LOG_FILE == REPO_ROOT / "data" / "decisions" / "log.csv"
+
+
+def test_the_decision_log_is_the_same_file_from_any_working_directory(tmp_path, monkeypatch):
+    """The behavioural half. A controller started from `/` used to write its
+    audit trail to `/data/decisions/log.csv`, where the dashboard -- started from
+    the repo root, holding the same relative string -- never looked. Two
+    processes holding one relative Path do not agree about a file.
+
+    Unlike STOP there is deliberately no cwd-relative second location: a kill
+    switch fails safe by stopping, so "any of these files" is right for it, but a
+    log written in two places at once is a split audit trail.
+    """
+    from_here = COMMITTED_LOG_FILE.resolve()
+    monkeypatch.chdir(tmp_path)
+    assert COMMITTED_LOG_FILE.resolve() == from_here, (
+        "the decision log moved with the working directory"
+    )
+    assert REPO_ROOT in COMMITTED_LOG_FILE.parents
+
+
+def test_the_committed_lease_directory_is_anchored_with_the_decision_log(tmp_path, monkeypatch):
+    """`cooldown_dir()` is derived from LOG_FILE, so anchoring the log anchors the
+    cross-process lease namespace with it.
+
+    This is the half that is a safety rail rather than an audit trail: two
+    controllers started from different directories shared no cooldown and no
+    rate-limit budget, each believed it was within budget, and every row in both
+    logs read `executed`. Reads only -- nothing here writes into the repo.
+    """
+    monkeypatch.setattr(controller, "LOG_FILE", COMMITTED_LOG_FILE)
+    anchored = controller.cooldown_dir()
+    heartbeats = controller.instance_dir()
+    monkeypatch.chdir(tmp_path)
+
+    assert anchored == controller.cooldown_dir(), "the lease namespace is cwd-dependent"
+    assert heartbeats == controller.instance_dir(), "the heartbeats are cwd-dependent"
+    assert anchored.is_absolute() and REPO_ROOT in anchored.parents
+    assert anchored == COMMITTED_LOG_FILE.parent / "cooldowns"
+
+
+def test_redirecting_the_log_still_redirects_everything_derived_from_it(live, tmp_path):
+    """The property the derivation exists for, and the one cluster promised
+    testing's fixtures would keep: redirect LOG_FILE and the leases AND the
+    heartbeats follow, with no second constant for anyone to remember.
+
+    Anchoring the log must not quietly take this away -- if it had, every test
+    that redirects LOG_FILE would start writing real lease files into the
+    developer's working tree, and the first symptom would be flakiness
+    somewhere else.
+    """
+    assert controller.LOG_FILE.parent == tmp_path / "decisions", "fixture did not redirect"
+    assert controller.cooldown_dir() == controller.LOG_FILE.parent / "cooldowns"
+    assert controller.instance_dir() == controller.LOG_FILE.parent / "controllers"
+
+    controller.record_action("nginx")
+
+    assert lease_for("nginx").exists()
+    assert tmp_path in controller.cooldown_dir().resolve().parents
+    assert REPO_ROOT not in controller.cooldown_dir().resolve().parents, (
+        "a test just wrote a cooldown lease inside the repo"
+    )
+    assert REPO_ROOT not in controller.instance_dir().resolve().parents
+
+
+def test_the_startup_report_names_the_anchored_decision_log(tmp_path, monkeypatch):
+    """How an operator confirms where the audit trail is going. It has to be the
+    same answer from every working directory, because being printed was never
+    the problem -- being printed and being wrong was.
+    """
+    monkeypatch.setattr(controller, "LOG_FILE", COMMITTED_LOG_FILE)
+    monkeypatch.chdir(tmp_path)
+    report = controller.startup_report()
+
+    assert str(COMMITTED_LOG_FILE) in report
+    assert str(controller.cooldown_dir()) in report
+    # Only these two lines. The kill-switch lines legitimately name the working
+    # directory -- a cwd-relative STOP is honoured on purpose -- and that is the
+    # one path here that is SUPPOSED to follow the operator around.
+    audit = [
+        line for line in report.splitlines()
+        if "decision log:" in line or "cooldown leases:" in line
+    ]
+    assert len(audit) == 2, f"the startup report stopped naming both paths: {report}"
+    assert all(str(tmp_path) not in line for line in audit), (
+        "the startup report resolved the audit trail against the working directory"
+    )
+
+
+# --- the cooldown is shared state, not a lock: make the gap announce itself ---
+#
+# Re-examined 2026-10-13 and left open deliberately (the reasoning is in
+# controller.py, above `cooldown_dir()`). What is tested here is the detection
+# that replaces closing it: a second controller against the same log is
+# announced rather than assumed absent. It refuses nothing, and these tests pin
+# that too -- a detector that could block remediation would be a worse rail than
+# the race it reports.
+
+
+def test_shadow_mode_publishes_no_heartbeat():
+    """DRY_RUN is on here. The shadow arm accumulates no state the live arm
+    would -- and it cannot race anybody either, because it never reaches
+    `record_action`. A heartbeat therefore means exactly "a process that can
+    touch the cluster is live against this log".
+    """
+    api = ForbiddenApi()
+    assert controller.announce_self() is None
+    assert run_once(api, "rolling_restart")[0] == "dry-run"
+    assert not controller.instance_dir().exists(), "the shadow arm announced itself"
+
+
+def test_shadow_mode_is_still_told_that_a_live_controller_is_running():
+    """Reading is not writing. A shadow process publishes nothing, but it is
+    still entitled to be told a live one is running against the log it reads --
+    and because this only ever prints, it cannot leak the live arm's behaviour
+    into a shadow row the way reading a lease would.
+    """
+    plant_heartbeat("otherhost:4242")
+    assert controller.other_controllers() == ["otherhost:4242"]
+    assert "other controllers on this log: otherhost:4242" in controller.startup_report()
+
+    api = ForbiddenApi()
+    assert run_once(api, "rolling_restart")[0] == "dry-run"
+    rows = log_rows()
+    assert rows[-1]["mode"] == "shadow" and rows[-1]["result"] == "dry-run", (
+        "a heartbeat changed what the shadow arm recorded"
+    )
+
+
+def test_acting_announces_this_process_and_reports_the_other_one(live, capsys):
+    """The whole point: the remaining race is one API call wide, and an operator
+    finds that out from a line in the log rather than from two remediations
+    landing on one workload.
+
+    `record_action` is where this happens, not `run_loop`, because the eval
+    harness and any head-to-head script call `execute_action` directly -- so
+    anything that acts becomes visible BY acting.
+    """
+    plant_heartbeat("otherhost:4242")
+    api = SpyAppsApi(replicas=1)
+
+    assert controller.execute_action(api, "nginx", "rolling_restart") == "executed"
+
+    warning = capsys.readouterr().out
+    assert "another controller is live" in warning
+    assert "otherhost:4242" in warning
+    assert "not a lock" in warning
+    assert str(controller.LOG_FILE) in warning
+    assert (controller.instance_dir() / controller._instance_name()).exists(), (
+        "the process that acted did not announce itself"
+    )
+
+
+def test_the_detection_refuses_nothing(live):
+    """Detection, not mutual exclusion. A foreign heartbeat must never be able to
+    block a remediation: that would be a new way to fail closed, added to fix a
+    race nobody has hit. The warning is the whole product.
+    """
+    for pid in range(5):
+        plant_heartbeat(f"otherhost:{pid}")
+    api = SpyAppsApi(replicas=1)
+
+    assert controller.execute_action(api, "nginx", "rolling_restart") == "executed"
+    assert api.mutations, "the heartbeat check swallowed the remediation"
+
+
+def test_a_stale_heartbeat_is_not_reported(live, capsys):
+    """One cooldown window of staleness, and that is the exact number: a process
+    whose last heartbeat is older than COOLDOWN_SECONDS can no longer be holding
+    a lease that would refuse anything, so no rail can still be sharing with it.
+    A controller killed yesterday must not warn forever.
+    """
+    plant_heartbeat("ghost:1", age_seconds=controller.HEARTBEAT_STALE_SECONDS + 1)
+    assert controller.other_controllers() == []
+    assert "none seen" in controller.startup_report()
+
+    controller.record_action("nginx")
+    assert "another controller is live" not in capsys.readouterr().out
+
+    plant_heartbeat("ghost:1", age_seconds=controller.HEARTBEAT_STALE_SECONDS - 5)
+    assert controller.other_controllers() == ["ghost:1"]
+
+
+def test_heartbeats_are_not_counted_as_actions(live):
+    """The heartbeats live in their own directory, NOT beside the leases.
+
+    `_lease_times()` counts every `.lease` in `cooldown_dir()` as one spent
+    action, so a heartbeat written there would silently consume the fleet-wide
+    budget -- a detector that disabled the rail it was reporting on.
+    """
+    assert controller.instance_dir() != controller.cooldown_dir()
+    for pid in range(controller.MAX_ACTIONS_PER_WINDOW + 2):
+        plant_heartbeat(f"otherhost:{pid}")
+
+    assert controller.recent_actions() == []
+    assert not controller.rate_limit_active()
+
+    controller.record_action("nginx")
+    leases = sorted(path.name for path in controller.cooldown_dir().iterdir())
+    assert leases == ["nginx.lease"], f"something other than a lease landed: {leases}"
+
+
+def test_two_processes_on_one_host_do_not_share_a_heartbeat_filename():
+    """Host AND pid. Two containers mounting the same volume can hold the same
+    pid, and two processes sharing one filename is this detector failing in the
+    direction of saying nothing.
+    """
+    name = controller._instance_name()
+    assert name.endswith(".alive")
+    assert str(os.getpid()) in name
+    assert "/" not in name and "\\" not in name
+    assert (controller.instance_dir() / name).parent == controller.instance_dir()
+
+
+def test_a_heartbeat_that_cannot_be_written_says_so(live, tmp_path, monkeypatch, capsys):
+    """It is diagnostics, not a rail, so a filesystem that refuses the write must
+    not take the controller down -- but it must not be silent either. The thing
+    that fails here is the warning itself, so its failure has to be the loud one.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(controller, "LOG_FILE", blocker / "decisions" / "log.csv")
+
+    assert controller.announce_self() is None
+    out = capsys.readouterr().out
+    assert "could not write the controller heartbeat" in out
+    assert "will not be reported" in out

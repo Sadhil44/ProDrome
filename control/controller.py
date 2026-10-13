@@ -4,7 +4,8 @@ import os
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import quote
+import socket
+from urllib.parse import quote, unquote
 
 import pandas as pd
 
@@ -23,19 +24,32 @@ from ml.features import METRICS, WINDOW_SIZE
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 NAMESPACE = "prodrome"
-# SETUP.md S8 names this path, and the dashboard and eval harness both expect it.
+# The decision log, anchored to the repo root rather than the working directory.
 #
-# Deliberately still RELATIVE, which is a known and currently unfixable gap:
-# tests/test_integration.py asserts `controller.LOG_FILE == Path(
-# "data/decisions/log.csv")` to pin that the writer and the dashboard name the
-# same file, and tests/ is Aahan's. So the decision log still resolves against
-# the working directory: start the controller from elsewhere and it writes an
-# audit trail the dashboard and the eval harness never find. Same class of
-# defect as the STOP bug below, same severity-one-step-lower consequence (a lost
-# audit trail rather than a dead kill switch). `startup_report()` prints the
-# RESOLVED path so at least it is visible. Raised for testing rather than fixed
-# unilaterally.
-LOG_FILE = Path("data/decisions/log.csv")
+# This was `Path("data/decisions/log.csv")`, and SETUP.md S8 does name exactly
+# that path -- but S8 is a table of FILES IN THIS REPO, not of strings to
+# resolve against whatever directory an operator happened to be standing in.
+# Read as a relative string it means a different file per working directory: the
+# right one from a fresh clone and in CI, and `/data/decisions/log.csv` for an
+# operator who ran `python -m control.controller` from `/`. The spelling is
+# unchanged and still matches S8; what changed is what it is relative TO.
+#
+# Same class of defect as the STOP bug below, one notch less severe: a lost
+# audit trail rather than a dead kill switch. Three things followed it off the
+# cwd -- the log the dashboard reads, the log the eval harness scores, and
+# `cooldown_dir()`, which is derived from this path, so two controllers started
+# from different directories shared no cooldown and no rate-limit budget while
+# every row in both logs read `executed`. That last one is a rail failing open,
+# which is why this is not merely cosmetic.
+#
+# Unlike STOP there is deliberately NO cwd-relative fallback. A kill switch
+# should fail toward stopping, so "any of these files" is right for it; a log
+# written in two places at once is just a split audit trail, and a split lease
+# directory is the rail failure above. One anchored location.
+#
+# Announced on cluster/interfaces before the change, labeled diagnosis (the
+# dashboard imports this constant) and collect (the eval harness restates it).
+LOG_FILE = REPO_ROOT / "data" / "decisions" / "log.csv"
 DRY_RUN = True
 MAX_REPLICAS = 5
 COOLDOWN_SECONDS = 120
@@ -357,10 +371,43 @@ def execute_action(apps_api, workload, action):
 #   both read "no cooldown" and both act. The window is the gap between the
 #   check and the write -- one API call wide, not one tick wide -- so it removes
 #   the realistic failure (two controllers on 15s cycles stacking inside a 120s
-#   window) but not the simultaneous one. Closing it properly needs an atomic
-#   claim-before-act, which is a bigger change to the cooldown's recorded
-#   semantics (a claim that is then refused has to be released) and is not worth
-#   it until something is actually running two controllers.
+#   window) but not the simultaneous one.
+#
+#   RE-EXAMINED 2026-10-13. The judgement is UNCHANGED -- no atomic claim -- and
+#   the reasoning is written down here rather than left as a conclusion, because
+#   "not worth it" is not an argument anyone can check:
+#
+#   * The cheap atomic claim does not exist. `os.open(O_CREAT | O_EXCL)` is
+#     atomic on POSIX and on Windows, so claiming a lease that does not yet
+#     exist is easy -- but a cooldown lease is almost never ABSENT, it is
+#     present and stale, and replacing a stale file after reading its timestamp
+#     is read-then-write again. The race just moves one level down.
+#   * Naming the claim per window instead -- `<workload>.<floor(now /
+#     COOLDOWN_SECONDS)>.lease`, which O_EXCL does close cleanly -- turns the
+#     rolling cooldown into a tumbling one, so two actions one second apart
+#     across a window boundary become legal. That is a weaker rail bought with a
+#     stronger lock, which is the wrong trade.
+#   * A claim taken before the rate-limit check has to be RELEASED when the rate
+#     limit refuses, and a release is a delete a crash can lose. A lost release
+#     locks a workload out for a full window for an action that never happened,
+#     and because `recent_actions()` counts lease files, the fleet-wide budget
+#     would start being spent by refusals. The recorded semantics change from
+#     "when this workload was last acted on" to "when it was last claimed", and
+#     both the log and the budget are read by other seats.
+#   * What it buys is small: the remaining race needs two processes inside one
+#     API call of each other. Nothing runs two controllers today, and DRY_RUN is
+#     True, so nothing acts at all.
+#
+#   WHAT WAS ADDED INSTEAD, on the principle that a gap which announces itself
+#   is a different thing from one that does not: a process that CAN act
+#   publishes a heartbeat beside the log (`instance_dir()`), and
+#   `startup_report()` and `record_action()` say so -- loudly, by name -- when
+#   more than one is live against the same log. That is detection, not mutual
+#   exclusion. It deliberately refuses nothing: a stale heartbeat that could
+#   block remediation would be a new way to fail closed, and this seat does not
+#   get to add one of those to fix a race nobody has hit. Its reach is exactly
+#   the reach of the lease it watches -- two controllers that share no
+#   filesystem share no heartbeat either, and that case is still silent.
 # - Anything that writes a lease without acting, or acts without writing one.
 #   The lease records an ATTEMPT, not a confirmed cluster change.
 # - Shadow mode does not read leases at all, on purpose -- see `last_action()`.
@@ -541,10 +588,143 @@ def record_action(workload):
 
     Called from `execute_action`, where the write actually happens, so that a
     direct caller cannot issue an action without spending the budget for it.
+
+    Also announces this process and checks for others. A direct caller -- the
+    eval harness, a head-to-head script -- never goes through `run_loop` and so
+    would otherwise be invisible to every other process while spending the
+    shared budget. Announcing HERE means anything that acts becomes visible by
+    acting, which is the only moment the shared-state gap can actually bite.
     """
     now = datetime.now(timezone.utc)
     last_action_time[workload] = now
     _write_lease(workload, now)
+    announce_self()
+    warn_if_sharing(f"acting on {workload}")
+
+
+# --- who else is running against this log -------------------------------------
+#
+# The cooldown is shared state, not a lock (see the block above). Rather than
+# pretend otherwise, the controllers that can act say so, so that the one
+# condition under which the gap is reachable -- more than one of them live
+# against the same decision log -- is announced instead of assumed absent.
+
+# How long a heartbeat stays believable. One cooldown window, and that is the
+# exact number rather than a round one: a process whose last heartbeat is older
+# than COOLDOWN_SECONDS can no longer be holding a lease that would refuse
+# anything, so from every rail's point of view it is already gone. Heartbeats
+# are written once per tick (15s by default), so this tolerates eight missed
+# ticks before a running controller is declared stale.
+HEARTBEAT_STALE_SECONDS = COOLDOWN_SECONDS
+
+
+def instance_dir():
+    """Where controller heartbeats live: beside the log, next to the leases.
+
+    Derived from LOG_FILE for the same reason `cooldown_dir()` is -- the
+    question being answered is "who else is writing THIS log", so the heartbeats
+    have to move with it. A deliberately SEPARATE directory from the leases,
+    because `_lease_times()` counts everything in the lease directory as a spent
+    action and a heartbeat is not one.
+    """
+    return LOG_FILE.parent / "controllers"
+
+
+def _instance_name():
+    """This process's heartbeat filename: host and pid, percent-encoded.
+
+    Host as well as pid because two containers mounting the same volume can hold
+    the same pid, and two processes sharing one filename is this detector
+    failing in the direction of saying nothing.
+    """
+    return quote(f"{socket.gethostname()}:{os.getpid()}", safe="") + ".alive"
+
+
+def announce_self():
+    """Publish this process's heartbeat, if it is a process that can act.
+
+    Returns the path written, or None.
+
+    Writes NOTHING under DRY_RUN, on purpose and for two reasons. The shadow arm
+    must accumulate no state the live arm would, or collect's control-arm
+    comparison is measuring side effects; and a shadow controller cannot race
+    anyone, because it never reaches `record_action`. So a heartbeat means
+    exactly "a process that can touch the cluster is live against this log",
+    which is the only claim worth printing a warning about.
+
+    A filesystem that refuses the write is not fatal -- this is diagnostics, not
+    a rail -- but it is not silent either, because the warning below is the
+    thing that would quietly stop working.
+    """
+    if DRY_RUN:
+        return None
+
+    directory = instance_dir()
+    path = directory / _instance_name()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(datetime.now(timezone.utc).isoformat())
+    except OSError as error:
+        print(
+            f"[prodrome][WARN] could not write the controller heartbeat {path}: "
+            f"{error}. Other controllers will not see this process, so a second "
+            "controller sharing this log will not be reported."
+        )
+        return None
+    return path
+
+
+def other_controllers():
+    """Other live controllers against this log, by name, sorted.
+
+    Read even under DRY_RUN: a shadow process writes no heartbeat but is still
+    entitled to be told that a live one is running against the log it is
+    reading. This is a printed line only -- unlike `last_action()`, nothing here
+    feeds a decision, so it cannot leak the live arm's behaviour into shadow
+    rows.
+    """
+    me = _instance_name()
+    now = datetime.now(timezone.utc)
+    out = []
+    try:
+        entries = list(instance_dir().iterdir())
+    except OSError:
+        return out
+
+    for path in entries:
+        if path.suffix != ".alive" or path.name == me:
+            continue
+        # Same reader as the leases: the timestamp inside, or the file's mtime
+        # if it is unreadable. Falling back to mtime here errs toward REPORTING
+        # a controller that may not exist, which is the harmless direction for a
+        # warning that refuses nothing.
+        when = _read_lease(path)
+        if when is None:
+            continue
+        if (now - when).total_seconds() < HEARTBEAT_STALE_SECONDS:
+            out.append(unquote(path.stem))
+    return sorted(out)
+
+
+def warn_if_sharing(context=""):
+    """Say so, loudly, when another controller is live against this log.
+
+    Returns the list, so a caller can decide what to do with it; this function
+    itself decides nothing. The cooldown is shared state and not a lock, and the
+    remaining race is one API call wide -- small, but not zero, and the whole
+    point of this function is that the operator finds that out from a line in
+    the log rather than from two remediations landing on one workload.
+    """
+    others = other_controllers()
+    if others:
+        where = f" while {context}" if context else ""
+        print(
+            f"[prodrome][WARN] another controller is live against {LOG_FILE}"
+            f"{where}: {', '.join(others)}. The cooldown and the fleet budget "
+            "are SHARED STATE, not a lock -- both processes can read 'no "
+            "cooldown' and act inside the same window. Stop one of them."
+        )
+    return others
 
 
 def kill_switch_paths():
@@ -570,11 +750,19 @@ def startup_report():
 
     A kill switch nobody can locate is not a kill switch, and these paths used to
     be inferable only by reading the source and knowing the working directory.
-    Printed by `run_loop` and by `__main__`. LOG_FILE is printed RESOLVED on
-    purpose: it is still relative, so this line is how you find out it is not
-    where you assumed.
+    Printed by `run_loop` and by `__main__`. LOG_FILE and the lease directory are
+    printed RESOLVED, which is how an operator confirms where the audit trail is
+    going. Both are anchored to the repo root now, so this line reads the same
+    from every working directory -- and if it ever does not, something has
+    redirected the constant, which is itself worth seeing.
+
+    The last line reports any OTHER controller live against this log. The
+    cooldown is shared state and not a lock, so "how many of these are running"
+    is a fact an operator has to be able to read off the banner rather than
+    infer from two remediations landing on one workload.
     """
     stops = "\n".join(f"[prodrome]     {path}" for path in kill_switch_paths())
+    others = other_controllers()
     return "\n".join([
         f"[prodrome] mode={'shadow (DRY_RUN)' if DRY_RUN else 'LIVE'}  namespace={NAMESPACE}",
         "[prodrome] kill switch -- creating ANY of these files stops all remediation:",
@@ -585,6 +773,9 @@ def startup_report():
         f"[prodrome] rails: <={MAX_REPLICAS} replicas, one action per workload per "
         f"{COOLDOWN_SECONDS}s, <={MAX_ACTIONS_PER_WINDOW} actions across all workloads per "
         f"{RATE_LIMIT_WINDOW_SECONDS}s",
+        "[prodrome] other controllers on this log: "
+        + (f"{', '.join(others)} -- the shared cooldown is NOT a lock, stop one"
+           if others else "none seen"),
     ])
 
 
@@ -712,9 +903,16 @@ def run_loop(apps_api, workloads, metrics_source, detector, classifier, interval
     Prints `startup_report()` first and unconditionally. An operator who has to
     stop this thing needs to know which file to create before they need to
     create it, not while they are looking for it.
+
+    Heartbeats once per tick -- a no-op under DRY_RUN -- so that a controller
+    started later sees this one, and warns when the set of other live
+    controllers CHANGES rather than on every tick. A warning printed 240 times
+    an hour is one an operator filters out, which is the same as not printing it.
     """
     import time
+    announce_self()
     print(startup_report(), flush=True)
+    seen_others = warn_if_sharing("starting up")
     histories = defaultdict(lambda: deque(maxlen=WINDOW_SIZE))
     while True:
         for workload in workloads:
@@ -723,6 +921,9 @@ def run_loop(apps_api, workloads, metrics_source, detector, classifier, interval
             evaluate_once(
                 apps_api, workload, metrics, detector, classifier, histories[workload]
             )
+        announce_self()
+        if other_controllers() != seen_others:
+            seen_others = warn_if_sharing("running")
         time.sleep(interval_seconds)
 
 if __name__ == "__main__":
