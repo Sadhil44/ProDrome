@@ -142,12 +142,18 @@ guards, now passing.
 | `dashboard/terminal.py` | `COLUMNS` mirrored the controller's actual header rather than `SETUP.md` §7, and `row.get(col, "")` rendered a missing column as blanks — an operator could not tell "took no action" from "the column is gone". | Fixed, and then fixed harder: diagnosis replaced both `COLUMNS` and the path with imports from the controller, so the divergence is impossible rather than merely detectable. The path was separately wrong (`control/decisions.csv`), which no column check could have caught; both halves are pinned now. |
 | `ml/classifier.py` | `predict()` never checked `len(window) == WINDOW_SIZE`. Any length from 2 up summarized fine and returned a confident label computed over the wrong amount of history — which is what the controller assembles on a short buffer at startup. | Fixed. |
 
-The two xfails in the repo today are both in `control/test_policy_gates.py` and are **non-strict
-on purpose**: CPU_HOG's `min_confidence` equals the abstention floor so its gate is dead code,
-and a mutating action unlocks cheaper than an alert. The fix is a threshold value, which is a
-project decision on `crosstalk/decisions`, not something a test should force. Do not add
-`xfail_strict` to a pytest config — there is deliberately no `pytest.ini`, and adding one would
-turn two recorded findings into a red build.
+The two xfails in the repo today are both in `control/test_policy_gates.py`, and they are
+**imperative `pytest.xfail()` calls** (lines 89 and 124), not `@pytest.mark.xfail` markers. That
+distinction matters and this file previously got it wrong. An imperative call aborts the test and
+reports xfail unconditionally, so it can never XPASS: if somebody fixes these thresholds tomorrow,
+nothing goes red and nothing tells them the finding is stale. These two are recorded, not pinned.
+
+They are deliberately not strict markers: CPU_HOG's `min_confidence` equals the abstention floor
+so its gate is dead code, and a mutating action unlocks cheaper than an alert. The fix is a
+threshold value, which is a project decision on `crosstalk/decisions`, not something a test should
+force. There is deliberately no `pytest.ini` — but note that adding `xfail_strict` to one would
+**not** affect these two either way, since that setting governs only the marker. An earlier version
+of this paragraph claimed it would turn them into a red build; that was wrong.
 
 And one finding that is **not** an xfail, because the defect it records has since been fixed
 and its absence is pinned by a passing test
