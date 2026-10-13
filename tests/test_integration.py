@@ -530,16 +530,6 @@ def _history(depth):
     return [[1.0] * len(METRICS) for _ in range(depth)]
 
 
-@pytest.mark.xfail(
-    reason="evaluate_once() initialises predicted_class, confidence = "
-           "('NORMAL', 1.0) and logs that pair on a fired tick whose history is "
-           "shorter than WINDOW_SIZE, without calling the classifier. Raised by "
-           "cluster, confirmed here, posted to crosstalk/questions for diagnosis "
-           "and cluster 2026-10-12. Strict: when a row that no classifier "
-           "produced stops claiming a prediction, this XPASSes and the marker "
-           "comes off rather than rotting into a comment.",
-    strict=True,
-)
 def test_a_decision_row_never_reports_a_prediction_no_classifier_made(live_controller):
     """SETUP.md §7 gives the decision log `predicted_class` and `confidence`, and
     the dashboard and the eval harness read it by name. A row may only fill those

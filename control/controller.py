@@ -840,7 +840,49 @@ def evaluate_once(apps_api, workload, metrics, detector, classifier, history=Non
     itself now happens in `execute_action`, at the point of the write.
     """
     score, fired = detector.score(workload, [metrics.get(metric) for metric in METRICS])
-    predicted_class, confidence = ("NORMAL", 1.0)
+    # Empty until a classifier actually answers. These two cells were seeded
+    # `("NORMAL", 1.0)` and then logged unchanged on every row where
+    # `classifier.predict()` was never called -- a placeholder presented as a
+    # prediction, byte-for-byte indistinguishable in the decision log from a
+    # genuine confident NORMAL. An operator read "NORMAL 1.00" as the model
+    # being certain nothing was wrong at the exact moment the model had not
+    # been consulted at all.
+    #
+    # The invariant now is one clause: `predicted_class` and `confidence` are
+    # non-empty IFF `classifier.predict()` was called for this row. Empty means
+    # nobody asked; set means the model answered. `result` keeps its existing
+    # vocabulary -- no new word for this. Once the cells are empty, all three
+    # things `result="abstained"` conflates are recoverable from columns that
+    # are already there: empty = never asked, set-and-below-floor = answered.
+    #
+    # Empty rather than a sentinel class, for three reasons:
+    #
+    #   * Aggregation defaults decide it. With empty cells `df.confidence.mean()`
+    #     and a groupby over `predicted_class` are already correct and no
+    #     consumer changes. With a sentinel, every such computation is silently
+    #     wrong until each consumer is individually taught to filter it -- and
+    #     wrong in the direction that FLATTERS the model, which is exactly where
+    #     the original defect already pointed.
+    #   * A sentinel would join the class vocabulary, and `policy.decide` routes
+    #     unknown classes through `POLICY.get(...)`, so it could later acquire an
+    #     action. An empty cell cannot.
+    #   * `UNKNOWN` is confirmed wrong: control/policy.py already spends it on
+    #     "the model answered, below the floor".
+    #
+    # Applied to `fired=False` rows too, not just the fired-but-short-history
+    # row the finding was raised on. The aggregation argument is the whole
+    # argument and it does not stop at the firing gate: `fired=False` is the
+    # large majority of rows, so leaving NORMAL/1.0 there would leave the
+    # dominant term of every aggregate fabricated while the log read as though
+    # the defect had been dealt with -- worse than the original, because it
+    # looks fixed. Nothing is lost: the detector gate is already fully
+    # recoverable from `fired=False` and `result="not-fired"`.
+    #
+    # dashboard/terminal.py's `_cell()` is what keeps this honest on the reading
+    # side: pandas turns an empty CSV cell into NaN and `str(NaN)` is the word
+    # "nan", which in this column reads like a class name. Announced on
+    # cluster/interfaces before landing.
+    predicted_class, confidence = ("", "")
     action = "nothing"
     top_features = ""
     window_ready = history is not None and len(history) >= WINDOW_SIZE
@@ -859,7 +901,8 @@ def evaluate_once(apps_api, workload, metrics, detector, classifier, history=Non
         # confidence floor, an unmapped class, or not yet WINDOW_SIZE ticks of
         # history. This used to log `not-fired` next to `fired=True`, two columns
         # flatly contradicting each other, on what is one of the most common rows
-        # in the log at a 5.0% false-positive rate with a ~300s firing tail.
+        # in the log at the detector's 3.42% clean-window false-positive rate
+        # with a ~300s firing tail.
         # Announced as a decision-log contract change before being made.
         result = "abstained"
     else:
@@ -877,8 +920,10 @@ def evaluate_once(apps_api, workload, metrics, detector, classifier, history=Non
                 # API server restart. Previously the exception escaped before
                 # log_decision, so the attempt left NO audit row at all and
                 # recorded NO cooldown: the loop then retried every tick,
-                # forever, invisibly. At a 61% false-positive rate that is an
-                # unbounded action storm with no trace. So: log the attempt and
+                # forever, invisibly. Even at the measured 3.42% clean-window
+                # false-positive rate (the 61% figure this comment used to cite
+                # was retracted) that is an unbounded action storm with no
+                # trace -- firing is ~58% in-window. So: log the attempt and
                 # re-raise rather than carry on blind. The cooldown for it is
                 # recorded inside execute_action, where the write happened.
                 log_decision(

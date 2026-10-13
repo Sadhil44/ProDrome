@@ -709,6 +709,134 @@ def test_a_firing_without_enough_history_does_not_act(live):
     assert log_rows()[-1]["action"] == "nothing"
 
 
+# --- a placeholder presented as a prediction ---------------------------------
+#
+# `evaluate_once` used to seed `predicted_class, confidence = ("NORMAL", 1.0)`
+# before the gate and log that pair unchanged on every row where
+# `classifier.predict()` was never called. In the decision log that is
+# byte-for-byte what the model's own confident NORMAL looks like, so an
+# operator read "NORMAL 1.00" as certainty that nothing was wrong at the exact
+# moment nothing had been consulted -- and anyone averaging the `confidence`
+# column counted fabricated 1.0s as predictions, in the one direction that
+# flatters the model.
+#
+# The invariant below is one clause: those two cells are non-empty IFF the
+# classifier was asked. It is pinned on BOTH unasked branches, because the
+# `fired=False` branch is the larger one by far and a fix that left it alone
+# would have corrected a minority of the fabricated values while making the log
+# read as though the problem were dealt with.
+#
+# `result` gained no new word for this: "abstained" and "not-fired" already say
+# which branch a row came from, and an empty prediction cell plus those two is
+# enough to separate "never asked" from "answered, below the floor".
+
+def test_a_fired_tick_with_too_little_history_claims_no_prediction(live):
+    """The row the strict xfail in tests/test_integration.py was raised for."""
+    classifier = FakeClassifier(label_for("rolling_restart"), 1.0)
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(), classifier,
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    assert classifier.calls == 0
+    row = log_rows()[-1]
+    assert row["fired"] == "True"
+    assert row["result"] == "abstained"
+    assert row["predicted_class"] == "", (
+        "a row no classifier produced is still claiming a class"
+    )
+    assert row["confidence"] == "", (
+        "a row no classifier produced is still claiming a confidence"
+    )
+
+
+def test_a_tick_the_detector_gated_claims_no_prediction(live):
+    """The larger half of the same defect, and the one nobody had raised.
+
+    `fired=False` is most of the log. Leaving NORMAL/1.0 here would leave the
+    dominant term of `df.confidence.mean()` fabricated.
+    """
+    classifier = FakeClassifier(label_for("rolling_restart"), 1.0)
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(fired=False), classifier,
+        full_history(),
+    )
+    assert classifier.calls == 0
+    row = log_rows()[-1]
+    assert row["fired"] == "False"
+    assert row["result"] == "not-fired"
+    assert row["predicted_class"] == ""
+    assert row["confidence"] == ""
+
+
+def test_the_prediction_cells_are_filled_exactly_when_the_classifier_was_asked(live):
+    """The invariant itself, over a log holding all three kinds of row.
+
+    Asserted as an iff over the whole file rather than per row, because the
+    failure this replaces was precisely that two rows from completely different
+    paths were indistinguishable once written down.
+    """
+    asked = FakeClassifier(label_for("nothing"), 1.0)
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(), asked, full_history(),
+    )
+    assert asked.calls == 1, "the full-history branch did not consult the classifier"
+
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(), FakeClassifier("X", 1.0),
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(fired=False),
+        FakeClassifier("X", 1.0), full_history(),
+    )
+
+    rows = log_rows()
+    assert len(rows) == 3
+    answered, short_history, not_fired = rows
+
+    assert answered["predicted_class"] and answered["confidence"]
+    for row in (short_history, not_fired):
+        assert row["predicted_class"] == "" and row["confidence"] == "", (
+            f"no classifier ran for this row, yet it reports one: {row}"
+        )
+
+    # The whole point: the two paths are no longer interchangeable.
+    cells = ("predicted_class", "confidence")
+    assert any(answered[c] != short_history[c] for c in cells)
+
+
+def test_an_empty_prediction_cell_does_not_render_as_the_word_nan(live):
+    """The writer and the dashboard, checked together rather than separately.
+
+    pandas reads an empty CSV cell back as NaN and `str(NaN)` is the word "nan",
+    which in `predicted_class` reads like a class name and in `confidence` like
+    a number that failed to parse -- one misleading cell swapped for another.
+    dashboard/terminal.py's `_cell()` is what prevents that, and it is in a file
+    this seat does not own, so the two halves are pinned here against the row
+    the controller actually writes rather than against a hand-built frame.
+    """
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("rich")
+    from dashboard import terminal
+
+    controller.evaluate_once(
+        ForbiddenApi(), "nginx", one_tick(), FakeDetector(), FakeClassifier("X", 1.0),
+        full_history()[: WINDOW_SIZE - 1],
+    )
+    frame = pd.read_csv(controller.LOG_FILE)
+    assert frame["predicted_class"].isna().all(), (
+        "the empty cell did not survive the round trip as a missing value"
+    )
+
+    assert terminal._cell(frame["predicted_class"].iloc[0]) == ""
+    assert terminal._cell(frame["confidence"].iloc[0]) == ""
+
+    # And the mean of a column of unasked rows is not 1.0 -- it is undefined,
+    # which is the correct answer and the reason these cells are empty rather
+    # than a sentinel.
+    assert pd.isna(frame["confidence"].mean())
+
+
 # --- the decision log's top_features column ---------------------------------
 #
 # This was a strict xfail: classifier.predict() returned (label, confidence)
